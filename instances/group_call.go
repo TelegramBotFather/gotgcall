@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -166,6 +167,7 @@ func (g *GroupCall) startLocked(ctx context.Context) error {
 }
 
 func (g *GroupCall) stopStreamersLocked() {
+	g.logCallerLocked("stopStreamersLocked")
 	if g.audioStr != nil {
 		g.audioStr.Stop()
 		g.audioStr = nil
@@ -180,7 +182,26 @@ func (g *GroupCall) stopStreamersLocked() {
 	}
 }
 
+func (g *GroupCall) logCallerLocked(action string) {
+	pcs := make([]uintptr, 6)
+	n := runtime.Callers(2, pcs)
+	frames := runtime.CallersFrames(pcs[:n])
+	var trace []string
+	for {
+		f, more := frames.Next()
+		trace = append(trace, fmt.Sprintf("%s:%d", f.Function, f.Line))
+		if !more || len(trace) >= 5 {
+			break
+		}
+	}
+	g.log.Info(action, slog.Any("caller", trace),
+		slog.Bool("paused", g.paused), slog.Bool("closed", g.closed.Load()))
+}
+
 func (g *GroupCall) handleEnd(t models.StreamType, d models.Device, err error) {
+	g.log.Info("handleEnd fired",
+		slog.Any("type", t), slog.Any("device", d), slog.Any("err", err),
+		slog.Bool("closed", g.closed.Load()), slog.Bool("pausing", g.pausing.Load()))
 	if g.closed.Load() || g.pausing.Load() {
 		return
 	}

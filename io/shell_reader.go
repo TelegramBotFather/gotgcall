@@ -6,6 +6,7 @@ import (
 	"fmt"
 	stdio "io"
 	"log/slog"
+	"os"
 	"os/exec"
 	"sync"
 	"sync/atomic"
@@ -20,8 +21,16 @@ import (
 //
 // ShellReader is safe to use across goroutines for Close and Err. Read
 // must be serialized by a single consumer (the convention for io.Reader).
+//
+// We manage the stdout pipe ourselves (os.Pipe + cmd.Stdout = pw) rather
+// than using cmd.StdoutPipe so that cmd.Wait does NOT close the read end
+// out from under us. That's a documented stdlib gotcha — when Wait fires
+// the moment the child exits, StdoutPipe closes the read end immediately,
+// discarding any unread bytes in the kernel pipe buffer (i.e. the last
+// chunk of audio the streamer hadn't paced through yet). With a manual
+// pipe, reads drain naturally to io.EOF after the child's pw closes.
 type ShellReader struct {
-	stdout   stdio.ReadCloser
+	stdout   *os.File
 	cmd      *exec.Cmd
 	stderr   *utils.RingBuffer
 	cancel   context.CancelFunc
@@ -40,20 +49,27 @@ func NewShellReader(parent context.Context, program string, args []string, log *
 	}
 	ctx, cancel := context.WithCancel(parent)
 	cmd := exec.CommandContext(ctx, program, args...)
-	stdout, err := cmd.StdoutPipe()
+	pr, pw, err := os.Pipe()
 	if err != nil {
 		cancel()
-		return nil, fmt.Errorf("%w: stdout pipe: %v", models.ErrFFmpegSpawn, err)
+		return nil, fmt.Errorf("%w: pipe: %v", models.ErrFFmpegSpawn, err)
 	}
+	cmd.Stdout = pw
 	stderrRing := utils.NewRingBuffer(4096)
 	cmd.Stderr = stderrRing
 	if err = cmd.Start(); err != nil {
 		cancel()
+		_ = pr.Close()
+		_ = pw.Close()
 		return nil, fmt.Errorf("%w: %v", models.ErrFFmpegSpawn, err)
 	}
+	// Close our reference to the write end; the child has its own dup'd fd.
+	// When the child eventually exits, the kernel write end fully closes and
+	// our reads on pr drain the buffer then return io.EOF.
+	_ = pw.Close()
 	r := &ShellReader{
 		cmd:    cmd,
-		stdout: stdout,
+		stdout: pr,
 		stderr: stderrRing,
 		cancel: cancel,
 		doneCh: make(chan struct{}),
@@ -96,10 +112,13 @@ func (r *ShellReader) Read(p []byte) (int, error) {
 	return n, err
 }
 
-// Close terminates the subprocess and waits for the reaper.
+// Close terminates the subprocess (if still running) and our copy of the
+// read end of the pipe, then waits for the reaper. Closing the read end
+// unblocks any pending Read in-flight by another goroutine.
 func (r *ShellReader) Close() error {
 	r.waitOnce.Do(func() {
 		r.cancel()
+		_ = r.stdout.Close()
 	})
 	<-r.doneCh
 	if wErrPtr := r.waitErr.Load(); wErrPtr != nil {

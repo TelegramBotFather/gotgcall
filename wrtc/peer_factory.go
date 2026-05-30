@@ -38,7 +38,7 @@ func NewFactory(opts FactoryOptions) (*Factory, error) {
 	if log == nil {
 		log = slog.New(slog.DiscardHandler)
 	}
-	settings := webrtc.SettingEngine{}
+	settings := webrtc.SettingEngine{LoggerFactory: newFilteringLoggerFactory()}
 	settings.SetIncludeLoopbackCandidate(false)
 	settings.SetLite(false)
 
@@ -60,10 +60,20 @@ func NewFactory(opts FactoryOptions) (*Factory, error) {
 	if err := registerCodecs(mediaEngine); err != nil {
 		return nil, err
 	}
+	// Telegram's SFU requires ssrc-audio-level on every outbound audio
+	// packet — without it, audio is treated as silence and not forwarded.
+	if err := mediaEngine.RegisterHeaderExtension(webrtc.RTPHeaderExtensionCapability{URI: audioLevelURI}, webrtc.RTPCodecTypeAudio); err != nil {
+		return nil, err
+	}
+	if err := mediaEngine.RegisterHeaderExtension(webrtc.RTPHeaderExtensionCapability{URI: absSendTimeURI}, webrtc.RTPCodecTypeAudio); err != nil {
+		return nil, err
+	}
 	interceptors := &interceptor.Registry{}
 	if err := webrtc.RegisterDefaultInterceptors(mediaEngine, interceptors); err != nil {
 		return nil, err
 	}
+	interceptors.Add(&audioLevelInterceptorFactory{})
+	interceptors.Add(&markerClearInterceptorFactory{})
 
 	f.api = webrtc.NewAPI(
 		webrtc.WithSettingEngine(f.settings),

@@ -66,16 +66,14 @@ func NewShellReader(parent context.Context, program string, args []string, log *
 func (r *ShellReader) reap() {
 	defer close(r.doneCh)
 	err := r.cmd.Wait()
-	tail := r.stderr.Snapshot()
 	if err != nil {
 		if exitErr, ok := errors.AsType[*exec.ExitError](err); ok {
+			tail := r.stderr.Snapshot()
 			err = fmt.Errorf("%w: exit=%d stderr=%q",
 				models.ErrFFmpegCrashed, exitErr.ExitCode(), trimTail(tail))
 		}
 		r.waitErr.Store(&err)
-		r.log.Info("shell_reader: process exited with error", slog.Any("err", err))
-	} else {
-		r.log.Info("shell_reader: process exited cleanly (exit 0)", slog.String("stderr_tail", trimTail(tail)))
+		r.log.Debug("shell_reader: process exited with error", slog.Any("err", err))
 	}
 }
 

@@ -40,6 +40,7 @@ type GroupCall struct {
 	mu       sync.RWMutex
 	netState atomic.Int32 // models.ConnState
 	closed   atomic.Bool
+	pausing  atomic.Bool // true while Pause is tearing down the streamer; suppresses OnStreamEnd
 	paused   bool
 	muted    bool
 	videoOff bool
@@ -180,7 +181,7 @@ func (g *GroupCall) stopStreamersLocked() {
 }
 
 func (g *GroupCall) handleEnd(t models.StreamType, d models.Device, err error) {
-	if g.closed.Load() {
+	if g.closed.Load() || g.pausing.Load() {
 		return
 	}
 	if g.disp != nil && g.ev.OnStreamEnd != nil {
@@ -204,6 +205,9 @@ func (g *GroupCall) Pause() (bool, error) {
 	case g.videoStr != nil:
 		g.resumeMs += g.videoStr.ElapsedMs()
 	}
+	// Suppress OnStreamEnd from the teardown — Pause is an explicit caller
+	// action, not a "stream ended" event. Resume clears the flag.
+	g.pausing.Store(true)
 	g.paused = true
 	g.stopStreamersLocked()
 	return true, nil
@@ -219,6 +223,7 @@ func (g *GroupCall) Resume() (bool, error) {
 		return false, nil
 	}
 	g.paused = false
+	g.pausing.Store(false)
 	if g.src == nil {
 		return true, nil
 	}

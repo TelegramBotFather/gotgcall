@@ -4,12 +4,22 @@ import (
 	"fmt"
 	"log/slog"
 	"sync"
+	"time"
 
 	"github.com/pion/webrtc/v4"
 
 	"github.com/annihilatorrrr/gotgcall/models"
 	"github.com/annihilatorrrr/gotgcall/wrtc/jsonparams"
 )
+
+// defaultSTUNServers gives pion at least one reflexive-address server so it
+// can gather srflx candidates behind NATs. Without these, only host
+// candidates are emitted and any non-LAN connection fails ICE.
+var defaultSTUNServers = []webrtc.ICEServer{
+	{URLs: []string{"stun:stun.l.google.com:19302"}},
+	{URLs: []string{"stun:stun1.l.google.com:19302"}},
+	{URLs: []string{"stun:stun2.l.google.com:19302"}},
+}
 
 // PeerConnection wraps pion's PeerConnection with Telegram-specific
 // signaling glue. One per group-call instance. Send-only audio+video.
@@ -40,10 +50,34 @@ func NewPeerConnection(f *Factory, log *slog.Logger) (*PeerConnection, error) {
 		BundlePolicy:  webrtc.BundlePolicyMaxBundle,
 		RTCPMuxPolicy: webrtc.RTCPMuxPolicyRequire,
 		SDPSemantics:  webrtc.SDPSemanticsUnifiedPlan,
+		ICEServers:    defaultSTUNServers,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("create peer connection: %w", err)
 	}
+
+	// ICE-stuck watchdog: if ICE stays in Checking for more than 5 s, close
+	// the PeerConnection so the caller can retry. Without this, a flaky NAT
+	// hole-punch leaves us hanging silently.
+	var (
+		iceStuckTimer *time.Timer
+		iceTimerMu    sync.Mutex
+	)
+	pc.OnICEConnectionStateChange(func(state webrtc.ICEConnectionState) {
+		log.Debug("ICE state", slog.String("state", state.String()))
+		iceTimerMu.Lock()
+		defer iceTimerMu.Unlock()
+		if iceStuckTimer != nil {
+			iceStuckTimer.Stop()
+			iceStuckTimer = nil
+		}
+		if state == webrtc.ICEConnectionStateChecking {
+			iceStuckTimer = time.AfterFunc(5*time.Second, func() {
+				log.Warn("ICE stuck in checking for 5s, closing peer connection")
+				_ = pc.Close()
+			})
+		}
+	})
 
 	audio, err := NewAudioTrack("audio0", "gotgcall-stream")
 	if err != nil {

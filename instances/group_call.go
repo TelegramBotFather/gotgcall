@@ -183,7 +183,7 @@ func (g *GroupCall) stopStreamersLocked() {
 func (g *GroupCall) handleEnd(t models.StreamType, d models.Device, err error) {
 	closed := g.closed.Load()
 	pausing := g.pausing.Load()
-	g.log.Info("handleEnd",
+	g.log.Debug("handleEnd",
 		slog.Any("type", t), slog.Any("device", d), slog.Any("err", err),
 		slog.Bool("closed", closed), slog.Bool("pausing", pausing))
 	if closed || pausing {

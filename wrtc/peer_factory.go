@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"strings"
 	"sync"
+	"time"
 
 	"github.com/pion/ice/v4"
 	"github.com/pion/interceptor"
@@ -42,6 +44,28 @@ func NewFactory(opts FactoryOptions) (*Factory, error) {
 	settings := webrtc.SettingEngine{LoggerFactory: newFilteringLoggerFactory()}
 	settings.SetIncludeLoopbackCandidate(false)
 	settings.SetLite(false)
+	// Telegram's edge mixers favor IPv4/UDP. Restricting candidate types here
+	// trims the ICE checklist (faster connect) and avoids spurious failed
+	// pairings over IPv6 / TCP that Telegram doesn't accept anyway.
+	settings.SetNetworkTypes([]webrtc.NetworkType{webrtc.NetworkTypeUDP4})
+	// Sensible ICE timeouts: 30 s disconnect grace, 60 s before declaring
+	// failed, 2 s keepalive — matches gortc's production values.
+	settings.SetICETimeouts(30*time.Second, 60*time.Second, 2*time.Second)
+	// Skip virtual / VPN interfaces — gathering candidates on them slows ICE
+	// and produces unreachable pairs.
+	settings.SetInterfaceFilter(func(name string) bool {
+		lower := strings.ToLower(name)
+		for _, skip := range []string{
+			"vethernet", "vmware", "virtualbox", "vbox", "hyper-v",
+			"loopback", "teredo", "isatap", "tap-",
+			"docker", "wsl", "tailscale", "zerotier", "openvpn",
+		} {
+			if strings.Contains(lower, skip) {
+				return false
+			}
+		}
+		return true
+	})
 
 	f := &Factory{
 		settings: settings,

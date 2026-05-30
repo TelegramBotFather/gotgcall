@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	stdio "io"
 	"log/slog"
 	"os"
 	"os/exec"

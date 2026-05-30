@@ -119,7 +119,13 @@ func audioFFArgs(input []string, o EncodeOptions) []string {
 		"-vbr", "on",
 		"-compression_level", "10",
 		"-frame_duration", strconv.Itoa(models.OpusFrameDurationMs),
+		// Critical: tell the OGG muxer to flush one page per frame_duration
+		// (microseconds). Default is 1s, which would batch ~50 Opus frames
+		// per OGG page — frame-per-page readers then consume the song at
+		// ~50× real-time.
+		"-page_duration", strconv.Itoa(models.OpusFrameDurationMs*1000),
 		"-application", "audio",
+		"-mapping_family", "0",
 		"-ar", strconv.Itoa(models.OpusSampleRate),
 		"-ac", strconv.Itoa(o.AudioChannels),
 		"-f", "ogg",

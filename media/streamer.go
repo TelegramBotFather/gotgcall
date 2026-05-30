@@ -34,15 +34,16 @@ type Streamer struct {
 	cancel context.CancelFunc
 	done   chan struct{}
 
-	onEnd  func(err error)
-	msSent atomic.Uint64
+	onEnd    func(err error)
+	gateCond *sync.Cond
+	msSent   atomic.Uint64
 
 	once sync.Once
 
+	gateMu sync.Mutex
+
 	muted atomic.Bool
 
-	gateMu     sync.Mutex
-	gateCond   *sync.Cond
 	pausedGate bool
 }
 

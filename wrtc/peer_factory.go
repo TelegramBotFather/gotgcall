@@ -3,6 +3,7 @@ package wrtc
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net"
 	"sync"
@@ -60,13 +61,28 @@ func NewFactory(opts FactoryOptions) (*Factory, error) {
 	if err := registerCodecs(mediaEngine); err != nil {
 		return nil, err
 	}
-	// Telegram's SFU requires ssrc-audio-level on every outbound audio
-	// packet — without it, audio is treated as silence and not forwarded.
-	if err := mediaEngine.RegisterHeaderExtension(webrtc.RTPHeaderExtensionCapability{URI: audioLevelURI}, webrtc.RTPCodecTypeAudio); err != nil {
-		return nil, err
+	// Telegram's SFU requires the full set of RTP header extensions below;
+	// without ssrc-audio-level audio is treated as silence and not forwarded.
+	audioExtensions := []string{
+		audioLevelURI,
+		absSendTimeURI,
+		transportCCURI,
+		sdesMidURI,
 	}
-	if err := mediaEngine.RegisterHeaderExtension(webrtc.RTPHeaderExtensionCapability{URI: absSendTimeURI}, webrtc.RTPCodecTypeAudio); err != nil {
-		return nil, err
+	for _, uri := range audioExtensions {
+		if err := mediaEngine.RegisterHeaderExtension(webrtc.RTPHeaderExtensionCapability{URI: uri}, webrtc.RTPCodecTypeAudio); err != nil {
+			return nil, fmt.Errorf("register audio hdrext %s: %w", uri, err)
+		}
+	}
+	videoExtensions := []string{
+		absSendTimeURI,
+		transportCCURI,
+		videoOrientationURI,
+	}
+	for _, uri := range videoExtensions {
+		if err := mediaEngine.RegisterHeaderExtension(webrtc.RTPHeaderExtensionCapability{URI: uri}, webrtc.RTPCodecTypeVideo); err != nil {
+			return nil, fmt.Errorf("register video hdrext %s: %w", uri, err)
+		}
 	}
 	interceptors := &interceptor.Registry{}
 	if err := webrtc.RegisterDefaultInterceptors(mediaEngine, interceptors); err != nil {

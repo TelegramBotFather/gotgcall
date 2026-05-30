@@ -10,8 +10,11 @@ import (
 )
 
 const (
-	audioLevelURI = "urn:ietf:params:rtp-hdrext:ssrc-audio-level"
-	absSendTimeURI = "http://www.webrtc.org/experiments/rtp-hdrext/abs-send-time"
+	audioLevelURI       = "urn:ietf:params:rtp-hdrext:ssrc-audio-level"
+	absSendTimeURI      = "http://www.webrtc.org/experiments/rtp-hdrext/abs-send-time"
+	transportCCURI      = "http://www.ietf.org/id/draft-holmer-rmcat-transport-wide-cc-extensions-01"
+	sdesMidURI          = "urn:ietf:params:rtp-hdrext:sdes:mid"
+	videoOrientationURI = "urn:3gpp:video-orientation"
 )
 
 // audioLevelInterceptorFactory builds interceptors that stamp the
@@ -34,8 +37,8 @@ type audioLevelStream struct {
 
 type audioLevelInterceptor struct {
 	interceptor.NoOp
-	mu      sync.RWMutex
 	streams map[uint32]*audioLevelStream
+	mu      sync.RWMutex
 }
 
 func (a *audioLevelInterceptor) BindLocalStream(info *interceptor.StreamInfo, writer interceptor.RTPWriter) interceptor.RTPWriter {

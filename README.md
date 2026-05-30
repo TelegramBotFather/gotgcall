@@ -29,7 +29,6 @@ gotgcall.FromRawPCM(r, gotgcall.RawAudioFormat{SampleRate: 48000, Channels: 2})
 gotgcall.FromRawVideo(r, gotgcall.RawVideoFormat{Width: 1280, Height: 720, FPS: 30})
 gotgcall.FromShell(cmd, gotgcall.TrackAudio)          // your own ffmpeg command
 gotgcall.FromFFmpegArgs(args, gotgcall.TrackAudio)    // pre-tokenized args
-gotgcall.Loop(src) / gotgcall.Concat(src1, src2, src3)
 ```
 
 ## Quick start

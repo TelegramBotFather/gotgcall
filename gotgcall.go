@@ -71,8 +71,6 @@ var (
 	FromRawVideo   = media.FromRawVideo
 	FromShell      = media.FromShell
 	FromFFmpegArgs = media.FromFFmpegArgs
-	Loop           = media.Loop
-	Concat         = media.Concat
 )
 
 // --- Errors (re-export for branchable errors.Is) -------------------------------

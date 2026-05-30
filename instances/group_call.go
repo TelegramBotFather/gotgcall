@@ -35,6 +35,7 @@ type GroupCall struct {
 	videoStr  *media.Streamer
 	srcEncOpt media.EncodeOptions
 	chatID    int64
+	resumeMs  uint64 // seek offset captured on Pause; injected via SeekableSource.OpenAt on Resume
 
 	mu       sync.RWMutex
 	netState atomic.Int32 // models.ConnState
@@ -97,6 +98,7 @@ func (g *GroupCall) SetSource(ctx context.Context, src media.Source, opt ...medi
 	g.stopStreamersLocked()
 
 	g.src = src
+	g.resumeMs = 0 // new source = fresh playback, drop any pending pause offset
 	if len(opt) > 0 {
 		g.srcEncOpt = opt[0]
 	}
@@ -112,7 +114,15 @@ func (g *GroupCall) startLocked(ctx context.Context) error {
 	if g.src == nil {
 		return nil
 	}
-	streams, err := g.src.Open(ctx)
+	var (
+		streams *media.Streams
+		err     error
+	)
+	if seekable, ok := g.src.(media.SeekableSource); ok && g.resumeMs > 0 {
+		streams, err = seekable.OpenAt(ctx, time.Duration(g.resumeMs)*time.Millisecond)
+	} else {
+		streams, err = g.src.Open(ctx)
+	}
 	if err != nil {
 		return fmt.Errorf("open source: %w", err)
 	}
@@ -187,6 +197,13 @@ func (g *GroupCall) Pause() (bool, error) {
 	if g.paused {
 		return false, nil
 	}
+	// Capture playback position so Resume can re-Open the source via -ss.
+	switch {
+	case g.audioStr != nil:
+		g.resumeMs += g.audioStr.ElapsedMs()
+	case g.videoStr != nil:
+		g.resumeMs += g.videoStr.ElapsedMs()
+	}
 	g.paused = true
 	g.stopStreamersLocked()
 	return true, nil
@@ -256,11 +273,12 @@ func (g *GroupCall) ElapsedMs() uint64 {
 	if str == nil {
 		str = g.videoStr
 	}
+	base := g.resumeMs
 	g.mu.RUnlock()
 	if str == nil {
-		return 0
+		return base
 	}
-	return str.ElapsedMs()
+	return base + str.ElapsedMs()
 }
 
 func (g *GroupCall) State() models.MediaState {

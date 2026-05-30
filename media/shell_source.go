@@ -4,7 +4,9 @@ import (
 	"context"
 	"fmt"
 	stdio "io"
+	"strconv"
 	"strings"
+	"time"
 
 	gtio "github.com/annihilatorrrr/gotgcall/io"
 	"github.com/annihilatorrrr/gotgcall/models"
@@ -101,6 +103,23 @@ func (s *shellSource) Tracks() Track {
 }
 
 func (s *shellSource) Open(ctx context.Context) (*Streams, error) {
+	return s.openWith(ctx, s.args)
+}
+
+// OpenAt spawns the configured ffmpeg command with `-ss <offset>` injected
+// before the first `-i`, replacing any existing `-ss` value. Lets
+// GroupCall.Pause/Resume preserve playback position for shell sources.
+func (s *shellSource) OpenAt(ctx context.Context, offset time.Duration) (*Streams, error) {
+	if s.err != nil {
+		return nil, s.err
+	}
+	if offset <= 0 {
+		return s.openWith(ctx, s.args)
+	}
+	return s.openWith(ctx, injectSeek(s.args, offset))
+}
+
+func (s *shellSource) openWith(ctx context.Context, args []string) (*Streams, error) {
 	if s.err != nil {
 		return nil, s.err
 	}
@@ -108,7 +127,7 @@ func (s *shellSource) Open(ctx context.Context) (*Streams, error) {
 	if bin == "" {
 		bin = ffmpegPath()
 	}
-	r, err := gtio.NewShellReader(ctx, bin, s.args, nil)
+	r, err := gtio.NewShellReader(ctx, bin, args, nil)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", models.ErrFFmpegSpawn, err)
 	}
@@ -123,6 +142,39 @@ func (s *shellSource) Open(ctx context.Context) (*Streams, error) {
 		return nil, fmt.Errorf("%w: no track selected", models.ErrInvalidParams)
 	}
 	return st, nil
+}
+
+// injectSeek returns args with `-ss <offset>` placed immediately before the
+// first `-i`. Any existing `-ss <value>` pair (input-side) is removed first.
+// If no `-i` is found, `-ss` is prepended.
+func injectSeek(args []string, offset time.Duration) []string {
+	offsetStr := strconv.FormatFloat(offset.Seconds(), 'f', 3, 64)
+	cleaned := make([]string, 0, len(args)+2)
+	inputIdx := -1
+	skip := false
+	for i, a := range args {
+		if skip {
+			skip = false
+			continue
+		}
+		// Drop only the input-side -ss (one appearing before -i).
+		if a == "-ss" && inputIdx < 0 && i+1 < len(args) {
+			skip = true
+			continue
+		}
+		if a == "-i" && inputIdx < 0 {
+			inputIdx = len(cleaned)
+		}
+		cleaned = append(cleaned, a)
+	}
+	if inputIdx < 0 {
+		return append([]string{"-ss", offsetStr}, cleaned...)
+	}
+	out := make([]string, 0, len(cleaned)+2)
+	out = append(out, cleaned[:inputIdx]...)
+	out = append(out, "-ss", offsetStr)
+	out = append(out, cleaned[inputIdx:]...)
+	return out
 }
 
 // tokenizeShell splits a shell-like string into argv tokens. Supports

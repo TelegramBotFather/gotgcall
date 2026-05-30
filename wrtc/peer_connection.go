@@ -1,8 +1,6 @@
 package wrtc
 
 import (
-	"crypto/rand"
-	"encoding/binary"
 	"fmt"
 	"log/slog"
 	"sync"
@@ -30,15 +28,13 @@ type PeerConnection struct {
 }
 
 // NewPeerConnection creates an outgoing pion connection with audio and
-// video tracks already attached. SSRCs are pre-generated (audio random,
-// video = audio+1) and bound as an FID group when the local params are
-// emitted.
+// video tracks already attached. SSRCs are read from pion's senders after
+// AddTrack so the values we announce to Telegram match the SSRCs pion
+// will actually emit on the wire.
 func NewPeerConnection(f *Factory, log *slog.Logger) (*PeerConnection, error) {
 	if log == nil {
 		log = slog.New(slog.DiscardHandler)
 	}
-	audioSSRC := randUint32()
-	videoSSRC := audioSSRC + 1
 
 	pc, err := f.NewPeerConnection(webrtc.Configuration{
 		BundlePolicy:  webrtc.BundlePolicyMaxBundle,
@@ -54,7 +50,8 @@ func NewPeerConnection(f *Factory, log *slog.Logger) (*PeerConnection, error) {
 		_ = pc.Close()
 		return nil, err
 	}
-	if _, err = pc.AddTrack(audio); err != nil {
+	audioSender, err := pc.AddTrack(audio)
+	if err != nil {
 		_ = pc.Close()
 		return nil, err
 	}
@@ -63,10 +60,19 @@ func NewPeerConnection(f *Factory, log *slog.Logger) (*PeerConnection, error) {
 		_ = pc.Close()
 		return nil, err
 	}
-	if _, err = pc.AddTrack(video); err != nil {
+	videoSender, err := pc.AddTrack(video)
+	if err != nil {
 		_ = pc.Close()
 		return nil, err
 	}
+
+	audioSSRC := senderSSRC(audioSender)
+	videoSSRC := senderSSRC(videoSender)
+	if audioSSRC == 0 {
+		_ = pc.Close()
+		return nil, fmt.Errorf("%w: audio sender returned no SSRC", models.ErrInternal)
+	}
+
 	return &PeerConnection{
 		pc:        pc,
 		audio:     audio,
@@ -75,6 +81,20 @@ func NewPeerConnection(f *Factory, log *slog.Logger) (*PeerConnection, error) {
 		videoSSRC: videoSSRC,
 		log:       log,
 	}, nil
+}
+
+// senderSSRC returns the SSRC pion has chosen for the sender's first
+// encoding. This is what will appear in outbound RTP — using it as the
+// announced SSRC keeps Telegram's mixer in sync with our packets.
+func senderSSRC(s *webrtc.RTPSender) uint32 {
+	if s == nil {
+		return 0
+	}
+	p := s.GetParameters()
+	if len(p.Encodings) == 0 {
+		return 0
+	}
+	return uint32(p.Encodings[0].SSRC)
 }
 
 // LocalParams returns the JSON string to send to Telegram via
@@ -147,10 +167,4 @@ func (p *PeerConnection) Close() error {
 	p.closed = true
 	p.mu.Unlock()
 	return p.pc.Close()
-}
-
-func randUint32() uint32 {
-	var b [4]byte
-	_, _ = rand.Read(b[:])
-	return binary.LittleEndian.Uint32(b[:])
 }

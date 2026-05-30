@@ -3,6 +3,7 @@ package media
 import (
 	"context"
 	stdio "io"
+	"log/slog"
 	"sync/atomic"
 	"time"
 )
@@ -120,4 +121,24 @@ func ffmpegPath() string {
 		return v.(string)
 	}
 	return "ffmpeg"
+}
+
+// Package-level logger used by ffmpeg-spawning sources for stderr/exit
+// diagnostics. Defaults to discard; SetLogger plumbs the Client's logger in.
+var mediaLogger atomic.Pointer[slog.Logger]
+
+// SetLogger sets the logger used by media-package ffmpeg shell readers.
+// Pass nil to disable logging.
+func SetLogger(l *slog.Logger) {
+	if l == nil {
+		l = slog.New(slog.DiscardHandler)
+	}
+	mediaLogger.Store(l)
+}
+
+func getLogger() *slog.Logger {
+	if l := mediaLogger.Load(); l != nil {
+		return l
+	}
+	return slog.New(slog.DiscardHandler)
 }

@@ -187,6 +187,7 @@ func New(opts ...Option) (*Client, error) {
 		opt(&cfg)
 	}
 	media.SetFFmpegPath(cfg.ffmpegPath)
+	media.SetLogger(cfg.logger)
 
 	factory, err := wrtc.NewFactory(wrtc.FactoryOptions{
 		Logger:       cfg.logger,

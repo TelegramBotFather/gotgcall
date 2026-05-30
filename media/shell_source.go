@@ -127,7 +127,7 @@ func (s *shellSource) openWith(ctx context.Context, args []string) (*Streams, er
 	if bin == "" {
 		bin = ffmpegPath()
 	}
-	r, err := gtio.NewShellReader(ctx, bin, args, nil)
+	r, err := gtio.NewShellReader(ctx, bin, args, getLogger())
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", models.ErrFFmpegSpawn, err)
 	}

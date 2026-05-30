@@ -71,8 +71,10 @@ func NewStreamer(parent context.Context, src FrameReader, writer Writer, log *sl
 // the loop wakes and resumes at real time.
 func (s *Streamer) SetPaused(p bool) {
 	s.gateMu.Lock()
+	prev := s.pausedGate
 	s.pausedGate = p
 	s.gateMu.Unlock()
+	s.log.Info("streamer: SetPaused", slog.Bool("from", prev), slog.Bool("to", p))
 	if !p {
 		s.gateCond.Broadcast()
 	}
@@ -121,7 +123,9 @@ func (s *Streamer) run() {
 			s.log.Error("streamer: panic", slog.Any("recover", r))
 			s.fireEnd(panicErr{v: r})
 		}
+		s.log.Info("streamer: run exiting", slog.Uint64("msSent", s.msSent.Load()))
 	}()
+	s.log.Info("streamer: run starting")
 
 	next := time.Now()
 	for {
@@ -143,6 +147,7 @@ func (s *Streamer) run() {
 		}
 		sample, err := s.src.Next(s.ctx)
 		if err != nil {
+			s.log.Info("streamer: src.Next returned err", slog.Any("err", err), slog.Uint64("msSent", s.msSent.Load()))
 			s.fireEnd(err)
 			return
 		}

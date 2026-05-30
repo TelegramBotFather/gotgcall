@@ -116,7 +116,7 @@ func audioFFArgs(input []string, o EncodeOptions) []string {
 		"-vn", "-sn", "-dn",
 		"-c:a", "libopus",
 		"-b:a", fmt.Sprintf("%dk", o.AudioBitrateKbps),
-		"-vbr", "constrained",
+		"-vbr", "on",
 		"-compression_level", "10",
 		"-frame_duration", strconv.Itoa(models.OpusFrameDurationMs),
 		// Critical: tell the OGG muxer to flush one page per frame_duration

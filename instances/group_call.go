@@ -198,18 +198,15 @@ func (g *GroupCall) Pause() (bool, error) {
 	if g.paused {
 		return false, nil
 	}
-	// Capture playback position so Resume can re-Open the source via -ss.
-	switch {
-	case g.audioStr != nil:
-		g.resumeMs += g.audioStr.ElapsedMs()
-	case g.videoStr != nil:
-		g.resumeMs += g.videoStr.ElapsedMs()
-	}
-	// Suppress OnStreamEnd from the teardown — Pause is an explicit caller
-	// action, not a "stream ended" event. Resume clears the flag.
-	g.pausing.Store(true)
 	g.paused = true
-	g.stopStreamersLocked()
+	// Block the pull loop on the streamer's gate without killing ffmpeg.
+	// The OS pipe absorbs the next ~1s of frames; Resume wakes the loop.
+	if g.audioStr != nil {
+		g.audioStr.SetPaused(true)
+	}
+	if g.videoStr != nil {
+		g.videoStr.SetPaused(true)
+	}
 	return true, nil
 }
 
@@ -224,6 +221,17 @@ func (g *GroupCall) Resume() (bool, error) {
 	}
 	g.paused = false
 	g.pausing.Store(false)
+	// If streamers exist (gate-paused), just unblock them. Otherwise the
+	// source was never started (e.g. paused before SetStreamSources) — start now.
+	if g.audioStr != nil || g.videoStr != nil {
+		if g.audioStr != nil {
+			g.audioStr.SetPaused(false)
+		}
+		if g.videoStr != nil {
+			g.videoStr.SetPaused(false)
+		}
+		return true, nil
+	}
 	if g.src == nil {
 		return true, nil
 	}

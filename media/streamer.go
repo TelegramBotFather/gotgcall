@@ -20,7 +20,10 @@ type Writer interface {
 
 // Streamer pulls Samples from a FrameReader at the sample's natural cadence
 // and pushes them to a Writer. Mute (audio) skips WriteSample but keeps
-// the clock advancing.
+// the clock advancing. Pause (set via SetPaused) blocks the pull loop on a
+// condition variable without tearing down the underlying ffmpeg process —
+// the OS pipe buffer absorbs ~1s of OGG bytes while paused; on resume the
+// loop wakes and drains them at real-time pace.
 type Streamer struct {
 	src    FrameReader
 	writer Writer
@@ -37,6 +40,10 @@ type Streamer struct {
 	once sync.Once
 
 	muted atomic.Bool
+
+	gateMu     sync.Mutex
+	gateCond   *sync.Cond
+	pausedGate bool
 }
 
 func NewStreamer(parent context.Context, src FrameReader, writer Writer, log *slog.Logger, onEnd func(error)) *Streamer {
@@ -44,7 +51,7 @@ func NewStreamer(parent context.Context, src FrameReader, writer Writer, log *sl
 		log = slog.New(slog.DiscardHandler)
 	}
 	ctx, cancel := context.WithCancel(parent)
-	return &Streamer{
+	s := &Streamer{
 		src:    src,
 		writer: writer,
 		log:    log,
@@ -53,10 +60,58 @@ func NewStreamer(parent context.Context, src FrameReader, writer Writer, log *sl
 		done:   make(chan struct{}),
 		onEnd:  onEnd,
 	}
+	s.gateCond = sync.NewCond(&s.gateMu)
+	return s
+}
+
+// SetPaused gates the run loop without canceling the context or closing the
+// source. While paused the pull loop blocks on a cond var; ffmpeg keeps
+// running and its stdout pipe buffers the next ~1s of frames. On resume
+// the loop wakes and resumes at real time.
+func (s *Streamer) SetPaused(p bool) {
+	s.gateMu.Lock()
+	s.pausedGate = p
+	s.gateMu.Unlock()
+	if !p {
+		s.gateCond.Broadcast()
+	}
+}
+
+// IsPaused reports whether the gate is currently blocking the loop.
+func (s *Streamer) IsPaused() bool {
+	s.gateMu.Lock()
+	defer s.gateMu.Unlock()
+	return s.pausedGate
+}
+
+// gate blocks while pausedGate is true. Returns false if the context is
+// canceled (i.e. Stop was called) while waiting, so the loop can exit cleanly.
+func (s *Streamer) gate() bool {
+	s.gateMu.Lock()
+	for s.pausedGate {
+		if s.ctx.Err() != nil {
+			s.gateMu.Unlock()
+			return false
+		}
+		// Wake on either Resume (Broadcast) or Stop (we Broadcast in cancel-watcher).
+		s.gateCond.Wait()
+	}
+	s.gateMu.Unlock()
+	return s.ctx.Err() == nil
 }
 
 // Start kicks off the pacing goroutine. Returns immediately.
-func (s *Streamer) Start() { go s.run() }
+func (s *Streamer) Start() {
+	// Cancel-watcher: when ctx fires we Broadcast so any gate() wait wakes up
+	// instead of holding the loop forever while Stop is trying to join.
+	go func() {
+		<-s.ctx.Done()
+		s.gateMu.Lock()
+		s.gateCond.Broadcast()
+		s.gateMu.Unlock()
+	}()
+	go s.run()
+}
 
 func (s *Streamer) run() {
 	defer close(s.done)
@@ -72,6 +127,18 @@ func (s *Streamer) run() {
 		if err := s.ctx.Err(); err != nil {
 			s.fireEnd(err)
 			return
+		}
+		// Gate before reading the next sample. While paused, ffmpeg's stdout
+		// pipe buffers ~64KB of frames; we resume reading on Broadcast.
+		if !s.gate() {
+			s.fireEnd(s.ctx.Err())
+			return
+		}
+		// Pacing baseline jumps over the paused duration so we don't burst
+		// every buffered frame on resume.
+		gateWake := time.Now()
+		if gateWake.After(next) {
+			next = gateWake
 		}
 		sample, err := s.src.Next(s.ctx)
 		if err != nil {

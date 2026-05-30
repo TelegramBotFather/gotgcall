@@ -10,8 +10,8 @@ import (
 	"sync"
 	"sync/atomic"
 
-	"gotgcall/models"
-	"gotgcall/utils"
+	"github.com/annihilatorrrr/gotgcall/models"
+	"github.com/annihilatorrrr/gotgcall/utils"
 )
 
 // ShellReader spawns a ffmpeg subprocess, exposes its stdout as a Reader,

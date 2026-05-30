@@ -6,8 +6,8 @@ package instances
 import (
 	"context"
 
-	"gotgcall/media"
-	"gotgcall/models"
+	"github.com/annihilatorrrr/gotgcall/media"
+	"github.com/annihilatorrrr/gotgcall/models"
 )
 
 // Call is the per-chat interface the top-level Client multiplexes over.

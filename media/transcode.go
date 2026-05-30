@@ -9,8 +9,8 @@ import (
 	"strings"
 	"time"
 
-	gtio "gotgcall/io"
-	"gotgcall/models"
+	gtio "github.com/annihilatorrrr/gotgcall/io"
+	"github.com/annihilatorrrr/gotgcall/models"
 )
 
 // ErrNotSeekable is returned by OpenAt when the source has no seekable input.

@@ -3,7 +3,7 @@ package wrtc
 import (
 	"github.com/pion/webrtc/v4"
 
-	"gotgcall/models"
+	"github.com/annihilatorrrr/gotgcall/models"
 )
 
 // NewAudioTrack creates a TrackLocalStaticSample carrying Opus (PT=111).

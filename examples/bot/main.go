@@ -17,7 +17,7 @@ import (
 	"strconv"
 	"syscall"
 
-	"gotgcall"
+	"github.com/annihilatorrrr/gotgcall"
 
 	"github.com/amarnathcjd/gogram/telegram"
 )

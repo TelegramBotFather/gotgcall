@@ -9,10 +9,10 @@ import (
 	"sync/atomic"
 	"time"
 
-	gtio "gotgcall/io"
-	"gotgcall/media"
-	"gotgcall/models"
-	"gotgcall/utils"
+	gtio "github.com/annihilatorrrr/gotgcall/io"
+	"github.com/annihilatorrrr/gotgcall/media"
+	"github.com/annihilatorrrr/gotgcall/models"
+	"github.com/annihilatorrrr/gotgcall/utils"
 )
 
 // RTMPCall pushes audio+video to a Telegram-issued RTMP URL via a single

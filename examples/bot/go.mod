@@ -4,7 +4,7 @@ go 1.26.3
 
 require (
 	github.com/amarnathcjd/gogram v1.7.3
-	gotgcall v0.0.0
+	github.com/annihilatorrrr/gotgcall v0.0.0
 )
 
 require (
@@ -32,4 +32,4 @@ require (
 	golang.org/x/time v0.15.0 // indirect
 )
 
-replace gotgcall => ../..
+replace github.com/annihilatorrrr/gotgcall => ../..

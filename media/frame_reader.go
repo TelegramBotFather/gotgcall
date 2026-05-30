@@ -10,7 +10,7 @@ import (
 	"github.com/pion/webrtc/v4/pkg/media/ivfreader"
 	"github.com/pion/webrtc/v4/pkg/media/oggreader"
 
-	"gotgcall/models"
+	"github.com/annihilatorrrr/gotgcall/models"
 )
 
 // frameReader is the internal interface the Streamer pulls from. It

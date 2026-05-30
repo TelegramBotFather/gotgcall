@@ -9,8 +9,8 @@ import (
 
 	"github.com/pion/webrtc/v4"
 
-	"gotgcall/models"
-	"gotgcall/wrtc/jsonparams"
+	"github.com/annihilatorrrr/gotgcall/models"
+	"github.com/annihilatorrrr/gotgcall/wrtc/jsonparams"
 )
 
 // PeerConnection wraps pion's PeerConnection with Telegram-specific

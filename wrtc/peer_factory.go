@@ -11,7 +11,7 @@ import (
 	"github.com/pion/interceptor"
 	"github.com/pion/webrtc/v4"
 
-	"gotgcall/models"
+	"github.com/annihilatorrrr/gotgcall/models"
 )
 
 // Factory creates pion PeerConnections. One Factory per Client; shared

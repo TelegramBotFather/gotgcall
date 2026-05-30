@@ -19,11 +19,11 @@ import (
 	"sync"
 	"sync/atomic"
 
-	"gotgcall/instances"
-	"gotgcall/media"
-	"gotgcall/models"
-	"gotgcall/utils"
-	"gotgcall/wrtc"
+	"github.com/annihilatorrrr/gotgcall/instances"
+	"github.com/annihilatorrrr/gotgcall/media"
+	"github.com/annihilatorrrr/gotgcall/models"
+	"github.com/annihilatorrrr/gotgcall/utils"
+	"github.com/annihilatorrrr/gotgcall/wrtc"
 )
 
 // --- Re-exports for ergonomics -------------------------------------------------

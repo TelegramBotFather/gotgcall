@@ -9,8 +9,8 @@ import (
 	"sync"
 	"sync/atomic"
 
-	"gotgcall/models"
-	"gotgcall/utils"
+	"github.com/annihilatorrrr/gotgcall/models"
+	"github.com/annihilatorrrr/gotgcall/utils"
 )
 
 // stdinShellReader is a minimal exec.Cmd wrapper used by transcodeSource

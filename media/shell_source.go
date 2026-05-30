@@ -6,8 +6,8 @@ import (
 	stdio "io"
 	"strings"
 
-	gtio "gotgcall/io"
-	"gotgcall/models"
+	gtio "github.com/annihilatorrrr/gotgcall/io"
+	"github.com/annihilatorrrr/gotgcall/models"
 )
 
 // FromShell parses cmdline as a shell command (handling double-quoted

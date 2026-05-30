@@ -1,4 +1,4 @@
-module gotgcall
+module github.com/annihilatorrrr/gotgcall
 
 go 1.26.3
 

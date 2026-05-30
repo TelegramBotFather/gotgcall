@@ -6,3 +6,17 @@
 *.test
 *.out
 vendor
+
+# Editor / IDE
+.idea/
+.vscode/
+
+# Tooling caches
+.claude/
+
+# Reference clones for understanding upstream codebases
+.refs/
+
+# Local session files for the example bot
+examples/bot/session.dat
+examples/bot/*.session

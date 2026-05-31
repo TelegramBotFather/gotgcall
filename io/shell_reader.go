@@ -55,7 +55,7 @@ func (r *ShellReader) SetOnExit(fn func(error)) {
 // returned reader streams stdout. If the program cannot be started,
 // ErrFFmpegSpawn is returned wrapped. When streamStderr is true, ffmpeg's
 // stderr is also tee'd line-by-line into the logger at Debug level — useful
-// for diagnosing "ffmpeg runs but I hear nothing" symptoms.
+// for diagnosing "ffmpeg runs, but I hear nothing" symptoms.
 func NewShellReader(parent context.Context, program string, args []string, log *slog.Logger, streamStderr bool) (*ShellReader, error) {
 	if log == nil {
 		log = slog.New(slog.DiscardHandler)
@@ -84,7 +84,7 @@ func NewShellReader(parent context.Context, program string, args []string, log *
 	}
 	// Close our reference to the write end; the child has its own dup'd fd.
 	// When the child eventually exits, the kernel write end fully closes and
-	// our reads on pr drain the buffer then return io.EOF.
+	// our reads on pr drain the buffer than return io.EOF.
 	_ = pw.Close()
 	r := &ShellReader{
 		cmd:    cmd,
@@ -145,8 +145,7 @@ func (r *ShellReader) reap() {
 	defer func() {
 		if v := recover(); v != nil {
 			r.log.Error("shell_reader: reap panic", slog.Any("recover", v))
-			panicErr := fmt.Errorf("%w: reap panic: %v", models.ErrInternal, v)
-			r.waitErr.Store(&panicErr)
+			r.waitErr.Store(new(fmt.Errorf("%w: reap panic: %v", models.ErrInternal, v)))
 		}
 		// Fire OnExit hook (if registered) after the process is fully reaped,
 		// so RTMPCall and similar consumers can react without spawning an

@@ -53,7 +53,7 @@ func NewRTMPCall(chatID int64, rtmpURL string, disp *utils.Dispatcher, log *slog
 
 func (r *RTMPCall) Mode() string { return "rtmp" }
 
-// WebRTC-only methods return ErrWrongMode for RTMP calls.
+// CreateLocalParams WebRTC-only methods return ErrWrongMode for RTMP calls.
 func (r *RTMPCall) CreateLocalParams() (string, error) { return "", models.ErrWrongMode }
 func (r *RTMPCall) Connect(string) error               { return models.ErrWrongMode }
 

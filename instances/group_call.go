@@ -64,6 +64,25 @@ func NewGroupCall(chatID int64, factory *wrtc.Factory, disp *utils.Dispatcher, l
 	gc.netState.Store(int32(models.Connecting))
 	pc.OnConnectionStateChange(func(s models.ConnState) {
 		gc.netState.Store(int32(s))
+		// When pion declares the PC Failed or Closed, the underlying transport
+		// is gone and any further WriteSample on the audio/video tracks is
+		// discarded internally. Tear the streamers down so we stop burning CPU
+		// + pipe-IO pumping samples into the void. Without this, a 3-minute
+		// song after an ICE Failed keeps ffmpeg + the streamer running for the
+		// full 3 minutes before EOF — observed as msSent climbing into the
+		// hundreds of thousands while the PC is already dead.
+		//
+		// Routed through the dispatcher so we don't take g.mu from pion's
+		// callback goroutine (which might race against SetSource holding it).
+		// onStreamEnd fires naturally from the streamer's run() defer as it
+		// exits, so the user's OnStreamEnd handler still triggers.
+		if (s == models.Failed || s == models.Closed) && gc.disp != nil {
+			gc.disp.Submit(func() {
+				gc.mu.Lock()
+				gc.stopStreamersLocked()
+				gc.mu.Unlock()
+			})
+		}
 		if gc.disp != nil && gc.ev.OnConnectionChange != nil {
 			gc.disp.Submit(func() { gc.ev.OnConnectionChange(models.NetworkInfo{State: s}) })
 		}

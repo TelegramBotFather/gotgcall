@@ -108,20 +108,25 @@ func NewFactory(opts FactoryOptions) (*Factory, error) {
 		networkTypes = []webrtc.NetworkType{webrtc.NetworkTypeUDP4}
 	}
 	settings.SetNetworkTypes(networkTypes)
-	// ICE timeouts: 30 s disconnect grace, 60 s before declaring failed, 2 s
-	// keepalive — matches gortc's production values. Override any/all of them
-	// via FactoryOptions.ICE* fields for unstable network environments.
+	// ICE timeouts: 60 s disconnect grace, 120 s before declaring failed, 2 s
+	// keepalive. Bumped 2× from the gortc baseline (30 s / 60 s) because in
+	// practice Telegram's edge wobble — especially on rejoins to the same chat
+	// — frequently takes 60–90 s to settle into a working candidate pair. The
+	// shorter window made pion declare Failed before the SFU had a chance to
+	// finish steering, producing spurious "connection failed" reports.
+	// Override via FactoryOptions.ICE* for ultra-responsive UIs (shorter) or
+	// extra-unstable networks (longer).
 	disconnect := opts.ICEDisconnectTimeout
 	if disconnect == 0 {
-		disconnect = 30 * time.Second
+		disconnect = 60 * time.Second
 	}
 	failed := opts.ICEFailedTimeout
 	if failed == 0 {
-		failed = 60 * time.Second
+		failed = 120 * time.Second
 	}
 	keepalive := opts.ICEKeepaliveInterval
 	if keepalive == 0 {
-		keepalive = 2 * time.Second
+		keepalive = 2 * time.Second // unchanged — more-frequent keepalive helps NAT bindings
 	}
 	settings.SetICETimeouts(disconnect, failed, keepalive)
 	// Skip virtual / VPN interfaces — gathering candidates on them slows ICE

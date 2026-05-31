@@ -107,17 +107,19 @@ var (
 type Option func(*config)
 
 type config struct {
-	logger          *slog.Logger
-	ffmpegPath      string
-	iceServers      []ICEServer
-	networkTypes    []NetworkType
-	certPoolSize    int
-	dispatchBuf     int
-	iceDisconnect   time.Duration
-	iceFailed       time.Duration
-	iceKeepalive    time.Duration
-	sharedUDPMux    bool
-	ffmpegStderrLog bool
+	logger           *slog.Logger
+	ffmpegPath       string
+	iceServers       []ICEServer
+	networkTypes     []NetworkType
+	certPoolSize     int
+	dispatchBuf      int
+	iceDisconnect    time.Duration
+	iceFailed        time.Duration
+	iceKeepalive     time.Duration
+	sharedUDPMux     bool
+	ffmpegStderrLog  bool
+	pionTraceAsDebug bool
+	logICECandidates bool
 }
 
 func defaultConfig() config {
@@ -248,6 +250,30 @@ func WithFFmpegStderrLog() Option {
 	return func(c *config) { c.ffmpegStderrLog = true }
 }
 
+// WithPionTraceLogs remaps pion's Trace-level output (per-ICE-check, per-
+// candidate-pair, per-binding-request) to slog.LevelDebug instead of the
+// default sub-debug level. Use this when ICE is stuck in "Checking" and you
+// need to see exactly which candidate pairs are being tried, which fail, and
+// which (if any) get a response from the remote.
+//
+//	gotgcall.New(gotgcall.WithDebugLogs(), gotgcall.WithPionTraceLogs())
+//
+// Volume warning: ICE Trace at scale is several hundred lines per call. Use
+// for diagnosis, not steady-state production.
+func WithPionTraceLogs() Option {
+	return func(c *config) { c.pionTraceAsDebug = true }
+}
+
+// WithICECandidateLogs logs every locally-gathered ICE candidate (host /
+// srflx / relay, address, port, foundation) at Debug level via the
+// PeerConnection's OnICECandidate hook. Pairs well with WithPionTraceLogs
+// for "why is ICE failing" diagnosis: this option shows what we offered,
+// pion-trace shows which pairs were tried, and the remote answer's
+// candidate list (parsed in jsonparams) shows what Telegram returned.
+func WithICECandidateLogs() Option {
+	return func(c *config) { c.logICECandidates = true }
+}
+
 // --- Client --------------------------------------------------------------------
 
 // Client multiplexes many concurrent group calls behind a single
@@ -300,6 +326,8 @@ func New(opts ...Option) (*Client, error) {
 		ICEDisconnectTimeout: cfg.iceDisconnect,
 		ICEFailedTimeout:     cfg.iceFailed,
 		ICEKeepaliveInterval: cfg.iceKeepalive,
+		PionTraceAsDebug:     cfg.pionTraceAsDebug,
+		LogICECandidates:     cfg.logICECandidates,
 	})
 	if err != nil {
 		return nil, err

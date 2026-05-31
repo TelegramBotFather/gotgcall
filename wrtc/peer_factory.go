@@ -21,14 +21,15 @@ import (
 // across all calls, optionally backed by a shared UDP mux for high
 // concurrency setups.
 type Factory struct {
-	udpMux     ice.UDPMux
-	api        *webrtc.API
-	log        *slog.Logger
-	certPool   *CertPool
-	settings   webrtc.SettingEngine
-	iceServers []webrtc.ICEServer
-	mu         sync.Mutex
-	closed     bool
+	udpMux           ice.UDPMux
+	api              *webrtc.API
+	log              *slog.Logger
+	certPool         *CertPool
+	settings         webrtc.SettingEngine
+	iceServers       []webrtc.ICEServer
+	mu               sync.Mutex
+	closed           bool
+	logICECandidates bool
 }
 
 // ICEServers returns the configured ICE server list (custom from
@@ -43,6 +44,14 @@ func (f *Factory) ICEServers() []webrtc.ICEServer {
 		return out
 	}
 	return nil
+}
+
+// LogICECandidates reports whether PeerConnection construction should hook
+// OnICECandidate to log each gathered candidate at Debug.
+func (f *Factory) LogICECandidates() bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.logICECandidates
 }
 
 type FactoryOptions struct {
@@ -65,6 +74,15 @@ type FactoryOptions struct {
 	// ICEKeepaliveInterval — STUN keepalive cadence. 0 = library default (2 s).
 	ICEKeepaliveInterval time.Duration
 	SharedUDPMux         bool
+	// PionTraceAsDebug remaps pion's Trace level to slog.LevelDebug instead
+	// of LevelDebug-4. Surfaces ICE per-check / per-candidate / per-binding-
+	// request lines in any standard Debug-level handler — useful for
+	// diagnosing "ICE stuck in Checking" failures.
+	PionTraceAsDebug bool
+	// LogICECandidates logs every locally-gathered candidate at Debug via
+	// pc.OnICECandidate. Read by PeerConnection construction to decide
+	// whether to install the candidate-logger hook.
+	LogICECandidates bool
 }
 
 func NewFactory(opts FactoryOptions) (*Factory, error) {
@@ -77,7 +95,7 @@ func NewFactory(opts FactoryOptions) (*Factory, error) {
 	// pion events. Without this, pion writes to its own default factory
 	// (stderr via the `log` package), bypassing every gotgcall.WithLogger
 	// configuration — the single biggest "debug logs aren't working" complaint.
-	settings := webrtc.SettingEngine{LoggerFactory: newSlogPionFactory(log)}
+	settings := webrtc.SettingEngine{LoggerFactory: newSlogPionFactory(log, opts.PionTraceAsDebug)}
 	settings.SetIncludeLoopbackCandidate(false)
 	settings.SetLite(false)
 	// Telegram's edge mixers favor IPv4/UDP. Restricting candidate types here
@@ -113,10 +131,11 @@ func NewFactory(opts FactoryOptions) (*Factory, error) {
 	settings.SetInterfaceFilter(makeInterfaceFilter())
 
 	f := &Factory{
-		settings:   settings,
-		log:        log,
-		certPool:   NewCertPool(opts.CertPoolSize, log),
-		iceServers: opts.ICEServers,
+		settings:         settings,
+		log:              log,
+		certPool:         NewCertPool(opts.CertPoolSize, log),
+		iceServers:       opts.ICEServers,
+		logICECandidates: opts.LogICECandidates,
 	}
 	if opts.SharedUDPMux {
 		lc, err := net.ListenPacket("udp4", ":0")

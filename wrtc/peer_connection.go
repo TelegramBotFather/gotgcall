@@ -65,6 +65,25 @@ func NewPeerConnection(f *Factory, log *slog.Logger) (*PeerConnection, error) {
 	pc.OnICEConnectionStateChange(func(state webrtc.ICEConnectionState) {
 		log.Debug("ICE state", slog.String("state", state.String()))
 	})
+	if f.LogICECandidates() {
+		// Opt-in (via gotgcall.WithICECandidateLogs()) — every locally-gathered
+		// candidate is logged at Debug. The nil candidate signals end-of-gather.
+		// Combine with WithPionTraceLogs to also see remote-side checks and
+		// pair selection.
+		pc.OnICECandidate(func(c *webrtc.ICECandidate) {
+			if c == nil {
+				log.Debug("ICE candidate gather complete")
+				return
+			}
+			log.Debug("ICE candidate gathered",
+				slog.String("typ", c.Typ.String()),
+				slog.String("proto", c.Protocol.String()),
+				slog.String("addr", c.Address),
+				slog.Int("port", int(c.Port)),
+				slog.String("foundation", c.Foundation),
+				slog.Int("component", int(c.Component)))
+		})
+	}
 
 	audio, err := NewAudioTrack("audio0", "gotgcall-stream")
 	if err != nil {

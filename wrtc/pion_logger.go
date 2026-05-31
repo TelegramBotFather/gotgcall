@@ -23,40 +23,52 @@ const pionScopeKey = "pion"
 //
 // Levels map straight through:
 //
-//	pion Trace → slog LevelDebug-4  (sub-debug; off unless you set a custom Leveler)
+//	pion Trace → slog LevelDebug-4  (sub-debug; off unless you set traceAsDebug)
 //	pion Debug → slog LevelDebug
 //	pion Info  → slog LevelInfo
 //	pion Warn  → slog LevelWarn
 //	pion Error → slog LevelError
 //
-// To see pion's ICE/DTLS/SCTP internals, construct your logger with
-// `slog.HandlerOptions{Level: slog.LevelDebug}` (or lower for Trace).
+// When traceAsDebug is true (via FactoryOptions.PionTraceAsDebug, surfaced
+// as gotgcall.WithPionTraceLogs()), pion Trace is remapped to LevelDebug so
+// standard Debug-level handlers see ICE per-check, per-candidate, and
+// per-binding-request lines — the data you actually need when ICE is stuck
+// in Checking and you want to know which candidate pairs are failing.
 type slogPionFactory struct {
-	log *slog.Logger
+	log          *slog.Logger
+	traceAsDebug bool
 }
 
-func newSlogPionFactory(log *slog.Logger) logging.LoggerFactory {
+func newSlogPionFactory(log *slog.Logger, traceAsDebug bool) logging.LoggerFactory {
 	if log == nil {
 		log = slog.New(slog.DiscardHandler)
 	}
-	return &slogPionFactory{log: log}
+	return &slogPionFactory{log: log, traceAsDebug: traceAsDebug}
 }
 
 func (f *slogPionFactory) NewLogger(scope string) logging.LeveledLogger {
 	return &filteringLogger{
-		inner: &slogLeveled{log: f.log, scope: scope},
+		inner: &slogLeveled{log: f.log, scope: scope, traceAsDebug: f.traceAsDebug},
 	}
 }
 
 // slogLeveled is a pion LeveledLogger that forwards to slog.
 type slogLeveled struct {
-	log   *slog.Logger
-	scope string
+	log          *slog.Logger
+	scope        string
+	traceAsDebug bool
 }
 
 // pionTraceLevel sits below slog.LevelDebug so debug-level handlers don't
 // see pion's trace spam by default.
 const pionTraceLevel = slog.LevelDebug - 4
+
+func (l *slogLeveled) traceLevel() slog.Level {
+	if l.traceAsDebug {
+		return slog.LevelDebug
+	}
+	return pionTraceLevel
+}
 
 func (l *slogLeveled) logf(level slog.Level, msg string) {
 	if !l.log.Enabled(context.Background(), level) {
@@ -65,8 +77,8 @@ func (l *slogLeveled) logf(level slog.Level, msg string) {
 	l.log.LogAttrs(context.Background(), level, msg, slog.String(pionScopeKey, l.scope))
 }
 
-func (l *slogLeveled) Trace(msg string)                  { l.logf(pionTraceLevel, msg) }
-func (l *slogLeveled) Tracef(format string, args ...any) { l.logf(pionTraceLevel, sprintfLazy(format, args)) }
+func (l *slogLeveled) Trace(msg string)                  { l.logf(l.traceLevel(), msg) }
+func (l *slogLeveled) Tracef(format string, args ...any) { l.logf(l.traceLevel(), sprintfLazy(format, args)) }
 func (l *slogLeveled) Debug(msg string)                  { l.logf(slog.LevelDebug, msg) }
 func (l *slogLeveled) Debugf(format string, args ...any) { l.logf(slog.LevelDebug, sprintfLazy(format, args)) }
 func (l *slogLeveled) Info(msg string)                   { l.logf(slog.LevelInfo, msg) }

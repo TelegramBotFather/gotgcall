@@ -43,7 +43,9 @@ Work in progress. Built for my own bots; the API is intentionally close to ntgca
 - [Concurrency model](#concurrency-model)
 - [Networking](#networking)
 - [Performance notes](#performance-notes)
+- [A/V sync](#av-sync)
 - [Pitfalls](#pitfalls)
+- [Performance vs ntgcalls](#performance-vs-ntgcalls)
 - [Why pure Go](#why-pure-go)
 - [License](#license)
 
@@ -154,10 +156,7 @@ client.SetStreamSources(chatID, gotgcall.FromFile("movie.mp4", gotgcall.EncodeOp
 }))
 ```
 
-URL-specific flags are auto-injected:
-- HLS (`.m3u8`): `-user_agent`, `-protocol_whitelist file,http,https,tcp,tls`, `-rw_timeout 10s`, `-http_persistent 1`
-- HTTP/HTTPS: `-reconnect 1`, `-reconnect_at_eof 1`, `-reconnect_streamed 1`, `-reconnect_delay_max 5`, `-timeout 10s`
-- Local files: `-analyzeduration 0 -probesize 64k` (cuts ~1-2s startup latency)
+Fast-start probing (`-analyzeduration 0 -probesize 64k`) is on by default for every source — cuts ~1-2 s off ffmpeg's startup latency vs the stock defaults (5 s + 5 MB). HLS sources additionally get `-user_agent`, `-protocol_whitelist file,http,https,tcp,tls`, `-rw_timeout 10s`, `-http_persistent 1`; HTTP/HTTPS sources get `-reconnect 1 -reconnect_at_eof 1 -reconnect_streamed 1 -reconnect_delay_max 5 -timeout 10s` so transient network blips don't kill the stream.
 
 Both `FromFile` and `FromURL` return seekable sources. `Pause` records the elapsed offset and `Resume` re-spawns ffmpeg with `-ss <offset>` injected before the input.
 
@@ -171,9 +170,9 @@ gotgcall.FromShell("ffmpeg -i thing.mp3", gotgcall.TrackAudio)
 
 Missing essentials are filled in automatically:
 
-- Input-side: `-analyzeduration 0`, `-probesize 64k`, `-err_detect ignore_err` (before `-i`)
-- Output-side (audio): `-c:a libopus`, `-application audio`, `-frame_duration 20`, `-page_duration 20000`, `-mapping_family 0`, `-ar 48000`, `-ac 2`, `-f ogg`, `pipe:1`
-- Output-side (video): `-c:v libvpx`, `-deadline realtime`, `-f ivf`, `pipe:1`
+- Input-side (always on): fast-start probing + `-err_detect ignore_err` before `-i`.
+- Output-side (audio): `-c:a libopus`, `-application audio`, `-frame_duration 20`, `-page_duration 20000`, `-mapping_family 0`, `-ar 48000`, `-ac 2`, `-f ogg`, `pipe:1`.
+- Output-side (video): `-c:v libvpx`, `-deadline realtime`, `-f ivf`, `pipe:1`.
 
 So the minimum command works:
 
@@ -469,44 +468,7 @@ All errors are sentinels — branch with `errors.Is`:
 - **Per-page OGG flush.** `-page_duration 20000` on `libopus` forces ffmpeg to emit one OGG page per Opus frame. The default (1s) would batch ~50 frames per page and the frame-per-page reader would consume the song at ~50× real-time.
 - **Fast-probe flags.** `-analyzeduration 0 -probesize 64k` on local files cuts ~1-2s of startup latency (default is 5s + 5MB).
 
-## Audit checklist (fixed-bug regression guard)
-
-A list of every protocol-level / pacing-level bug already encountered + the file:line where the fix lives. Use this when auditing or before touching the WebRTC plumbing.
-
-### Audio
-
-| Symptom | Root cause | Fixed in |
-| --- | --- | --- |
-| Audio joined but treated as silence by SFU, not forwarded to listeners | `ssrc-audio-level` RTP header extension not stamped on outbound audio packets — Telegram's SFU drops streams without it | `wrtc/audio_interceptor.go` — interceptor stamps `0x80 | 20` (VAD bit + -20 dBov) on every audio packet |
-| Last ~1 s of audio cut off when ffmpeg exits naturally | `cmd.StdoutPipe()` closes the read end the moment `cmd.Wait` fires, discarding buffered bytes in the kernel pipe | `io/shell_reader.go` — uses `os.Pipe()` manually so reads drain to EOF after the child exits |
-| ffmpeg outputs are produced ~50× faster than real-time, song "ends" instantly | OGG mux batches ~50 Opus frames per page by default; frame-per-page reader consumes 50 frames per pacing tick | `media/transcode.go` — `-page_duration 20000` forces one page per 20 ms Opus frame |
-| Pause-then-resume burst-plays buffered ffmpeg output | Pacing baseline didn't account for paused duration | `media/streamer.go` — pacing baseline jumps to `time.Now()` if it falls behind on resume |
-| `OnStreamEnd` phantom-fires during `SetSource` source swap | Old streamer's exit fires `onEnd` while the swap is in progress | `instances/group_call.go` — `g.switching` atomic gates `handleEnd` during the swap |
-| Audio jitter-buffer resync per packet, choppy playback | Pion's packetizer set the RTP `marker` bit on every Opus packet; per RFC 7587 it should only be set on the first packet after silence | `wrtc/audio_interceptor.go` — `markerClearInterceptor` zeros the marker on outbound audio |
-| Wrong sender SSRC announced to Telegram → silent audio | We announced an SSRC we picked but pion used a different one for the actual sender | `wrtc/peer_connection.go` — `senderSSRC()` reads pion's chosen SSRC AFTER `AddTrack` so the JSON and the RTP wire agree |
-| Audio dies on slow networks during ICE handshake | A 5 s ICE-stuck watchdog was killing legitimate handshakes | removed; pion's own 60 s ICE-failed timeout is the only gate |
-
-### Video
-
-| Symptom | Root cause | Fixed in |
-| --- | --- | --- |
-| Video timer increments on sender but nothing reaches participants | `ssrc-groups` was sending `FID:[audio, video]` — Telegram treats `FID` as primary+RTX pairs and discarded video packets as failed audio retransmissions | `wrtc/jsonparams/encode.go` — emits empty `ssrc-groups` (FID is video-RTX only, never cross-media) |
-| SFU can't bind video SSRC even when packets reach it | `sdes-mid` RTP header extension wasn't registered for video, so the SFU couldn't demux video from the BUNDLE | `wrtc/peer_factory.go` — added `sdesMidURI` to `videoExtensions` |
-| Requesting video on an audio-only source kills the call (exit 234) | `-map 0:v` is strict and fails with "Output file does not contain any stream" | `media/transcode.go` — `-map 0:v?` is tolerant; missing stream skipped silently |
-
-### Signalling / lifecycle
-
-| Symptom | Root cause | Fixed in |
-| --- | --- | --- |
-| Concurrent `CreateCall`/`StartRTMP` for the same chat allocated two pion PCs and leaked one | No per-chat creation gate | `gotgcall.go` — `c.createMu` per-chat `sync.Mutex` |
-| `Stop` then re-`CreateCall` for the same chat leaked the createMu entry | createMu was never cleaned on Stop | `gotgcall.go` — `Stop` clears the createMu entry |
-| Pion logged "Simulcast probing failed" / "Incoming unhandled RTP ssrc" at Error level for every other participant's RTP | Our PC is send-only; pion still reports incoming RTP it can't route | `wrtc/pion_logger.go` — `filteringLogger` drops these specific messages at Error and Warn levels |
-| `WithLogger` had no effect on pion's internal logs (ICE/DTLS/SCTP) | Pion writes to its own default logger via the `log` package, bypassing slog | `wrtc/pion_logger.go` — `slogPionFactory` bridges every pion logger into the user's slog handler with `pion=<scope>` tagging |
-| Debug spam from pion's interceptor scope drowning out useful logs | All pion scopes mixed together | filter by `pion=<scope>` attribute in your slog handler (`ice`, `dtls`, `sctp`, `interceptor`, etc.) |
-
-If you change anything in `wrtc/`, `media/`, or `io/`, re-check this table — the fixes are easy to undo accidentally during a refactor.
-
-### A/V sync
+## A/V sync
 
 - **RTP timestamps + RTCP Sender Reports** are what synchronise audio and video at the receiver. Pion's default interceptors send SR automatically; the receiver maps RTP timestamps to NTP via the SR.
 - **Both streamers are started in the same `startLocked` call** (`instances/group_call.go`), so their wall-clock baselines are within microseconds of each other.

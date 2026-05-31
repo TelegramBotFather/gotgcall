@@ -71,6 +71,12 @@ func ensureFFmpegFlags(args []string, track Track) []string {
 		if !has["-probesize"] {
 			inputInject = append(inputInject, "-probesize", "64k")
 		}
+		if !has["-err_detect"] {
+			// Tolerate decoder errors on bad input frames rather than aborting
+			// — the downstream OGG/IVF parsers can't recover from a half-flushed
+			// page.
+			inputInject = append(inputInject, "-err_detect", "ignore_err")
+		}
 	}
 	var outputInject []string
 	switch {
@@ -222,6 +228,106 @@ func (s *shellSource) openWith(ctx context.Context, args []string) (*Streams, er
 	default:
 		_ = r.Close()
 		return nil, fmt.Errorf("%w: no track selected", models.ErrInvalidParams)
+	}
+	return st, nil
+}
+
+// FromShells builds a Source from two separate ffmpeg commands — one for
+// audio, one for video. Either string may be empty to skip that track.
+// Mirrors ntgcalls' MediaDescription(microphone, camera) pattern for users
+// who want full control over both legs.
+//
+// Each cmd goes through the same auto-flag injection as FromShell, so a
+// minimal `ffmpeg -i movie.mp4` works for either leg.
+func FromShells(audioCmd, videoCmd string) Source {
+	if audioCmd == "" && videoCmd == "" {
+		return &multiShellSource{err: fmt.Errorf("%w: both commands empty", models.ErrInvalidParams)}
+	}
+	s := &multiShellSource{}
+	if audioCmd != "" {
+		tokens := tokenizeShell(audioCmd)
+		if len(tokens) == 0 {
+			return &multiShellSource{err: fmt.Errorf("%w: empty audio command", models.ErrFFmpegSpawn)}
+		}
+		if err := validateOutputCodec(tokens[1:], TrackAudio); err != nil {
+			return &multiShellSource{err: err}
+		}
+		s.audioBin = tokens[0]
+		s.audioArgs = ensureFFmpegFlags(tokens[1:], TrackAudio)
+	}
+	if videoCmd != "" {
+		tokens := tokenizeShell(videoCmd)
+		if len(tokens) == 0 {
+			return &multiShellSource{err: fmt.Errorf("%w: empty video command", models.ErrFFmpegSpawn)}
+		}
+		if err := validateOutputCodec(tokens[1:], TrackVideo); err != nil {
+			return &multiShellSource{err: err}
+		}
+		s.videoBin = tokens[0]
+		s.videoArgs = ensureFFmpegFlags(tokens[1:], TrackVideo)
+	}
+	return s
+}
+
+type multiShellSource struct {
+	err       error
+	audioBin  string
+	videoBin  string
+	audioArgs []string
+	videoArgs []string
+}
+
+func (s *multiShellSource) Tracks() Track {
+	var t Track
+	if s.audioArgs != nil {
+		t |= TrackAudio
+	}
+	if s.videoArgs != nil {
+		t |= TrackVideo
+	}
+	return t
+}
+
+func (s *multiShellSource) Open(ctx context.Context) (*Streams, error) {
+	if s.err != nil {
+		return nil, s.err
+	}
+	var closers []stdio.Closer
+	closeAll := func() error {
+		var firstErr error
+		for _, c := range closers {
+			if err := c.Close(); err != nil && firstErr == nil {
+				firstErr = err
+			}
+		}
+		return firstErr
+	}
+	st := &Streams{close: closeAll}
+	if s.audioArgs != nil {
+		bin := s.audioBin
+		if bin == "" {
+			bin = ffmpegPath()
+		}
+		r, err := gtio.NewShellReader(ctx, bin, s.audioArgs, getLogger())
+		if err != nil {
+			_ = closeAll()
+			return nil, fmt.Errorf("%w: audio: %v", models.ErrFFmpegSpawn, err)
+		}
+		closers = append(closers, r)
+		st.Audio = r
+	}
+	if s.videoArgs != nil {
+		bin := s.videoBin
+		if bin == "" {
+			bin = ffmpegPath()
+		}
+		r, err := gtio.NewShellReader(ctx, bin, s.videoArgs, getLogger())
+		if err != nil {
+			_ = closeAll()
+			return nil, fmt.Errorf("%w: video: %v", models.ErrFFmpegSpawn, err)
+		}
+		closers = append(closers, r)
+		st.Video = r
 	}
 	return st, nil
 }

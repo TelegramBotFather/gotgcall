@@ -20,7 +20,7 @@ type Call interface {
 	Connect(remoteJSON string) error
 
 	// SetSource installs the streaming source. Replaces atomically.
-	SetSource(ctx context.Context, src media.Source, opt ...media.EncodeOptions) error
+	SetSource(ctx context.Context, src media.Source) error
 
 	Pause() (bool, error)
 	Resume() (bool, error)

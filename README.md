@@ -18,12 +18,13 @@ ffmpeg must be on `PATH` at runtime (or set `gotgcall.WithFFmpegPath("/path/to/f
 
 ## Sources
 
-Three constructors, all targeting Opus-in-OGG (audio) or VP8-in-IVF (video):
+Four constructors, all targeting Opus-in-OGG (audio) or VP8-in-IVF (video):
 
 ```go
-gotgcall.FromFile("song.mp3")                        // local file
-gotgcall.FromURL("https://stream.example.com/...")   // HTTP / HLS / RTMP
-gotgcall.FromShell("ffmpeg -i thing.mp3 ...", gotgcall.TrackAudio)
+gotgcall.FromFile("song.mp3", gotgcall.EncodeOptions{})                  // local file
+gotgcall.FromURL("https://stream.example.com/...", gotgcall.EncodeOptions{}) // HTTP / HLS / RTMP
+gotgcall.FromShell("ffmpeg -i thing.mp3", gotgcall.TrackAudio)           // one custom command, one track
+gotgcall.FromShells("ffmpeg -i x.mp4 ...", "ffmpeg -i x.mp4 ...")        // two custom commands, both tracks
 ```
 
 Anything ffmpeg can decode is fair game — mp3, m4a, flac, ogg, opus, wav, webm, mp4, mkv, mov, etc. Defaults to **audio only**, regardless of what the container actually holds. Opt in to video extraction with `EncodeOptions{Tracks: TrackAudio | TrackVideo}`:
@@ -56,7 +57,7 @@ gotgcall.FromShell(`ffmpeg -i "movie.mp4" -an -c:v libvpx -deadline realtime `+
     `-b:v 800k -vf scale=1280:720 -r 30 -f ivf pipe:1`, gotgcall.TrackVideo)
 ```
 
-A single `FromShell` call produces a single output (audio OR video). For both tracks from one input use `FromFile`/`FromURL` with the `Tracks` opt — the library spawns the two ffmpeg legs for you.
+A single `FromShell` call produces a single output (audio OR video). For both tracks with custom ffmpeg for each, use `FromShells(audioCmd, videoCmd)` — equivalent to ntgcalls' `MediaDescription{microphone, camera}`. Either string may be empty to skip that track. For the convenience path use `FromFile`/`FromURL` with `Tracks: TrackVideo` and let the library construct both ffmpeg commands for you.
 
 ## Quick start
 

@@ -57,7 +57,7 @@ func (r *RTMPCall) Mode() string { return "rtmp" }
 func (r *RTMPCall) CreateLocalParams() (string, error) { return "", models.ErrWrongMode }
 func (r *RTMPCall) Connect(string) error               { return models.ErrWrongMode }
 
-func (r *RTMPCall) SetSource(ctx context.Context, src media.Source, opt ...media.EncodeOptions) error {
+func (r *RTMPCall) SetSource(ctx context.Context, src media.Source) error {
 	if r.closed.Load() {
 		return models.ErrClosed
 	}

@@ -89,7 +89,7 @@ func (g *GroupCall) Connect(remoteJSON string) error {
 	return g.pc.Connect(remoteJSON)
 }
 
-func (g *GroupCall) SetSource(ctx context.Context, src media.Source, opt ...media.EncodeOptions) error {
+func (g *GroupCall) SetSource(ctx context.Context, src media.Source) error {
 	if g.closed.Load() {
 		return models.ErrClosed
 	}
@@ -107,8 +107,12 @@ func (g *GroupCall) SetSource(ctx context.Context, src media.Source, opt ...medi
 
 	g.src = src
 	g.resumeMs = 0 // new source = fresh playback, drop any pending pause offset
-	if len(opt) > 0 {
-		g.srcEncOpt = opt[0]
+	// Source-owned encode opts (FPS for the VP8 reader's pacing). FromShell
+	// sources don't expose them — startLocked falls back to 30 FPS.
+	if sp, ok := src.(media.SourcePath); ok {
+		g.srcEncOpt = sp.EncodeOpts()
+	} else {
+		g.srcEncOpt = media.EncodeOptions{}
 	}
 
 	if g.paused {
@@ -137,37 +141,42 @@ func (g *GroupCall) startLocked(ctx context.Context) error {
 	g.streams = streams
 	g.startedAt = time.Now()
 
+	var audioOK, videoOK bool
 	if streams.Audio != nil {
-		fr, err := media.NewOpusFrameReader(streams.Audio)
-		if err != nil {
-			_ = streams.Close()
-			return err
+		fr, frErr := media.NewOpusFrameReader(streams.Audio)
+		if frErr != nil {
+			// Source had no audio stream (or it was malformed). Skip the
+			// audio track silently — the video leg (if any) still plays.
+			g.log.Debug("audio track unavailable, skipping", slog.Any("err", frErr))
+		} else {
+			g.audioStr = media.NewStreamer(ctx, fr, g.pc.AudioTrack(), g.log, func(err error) {
+				g.handleEnd(models.Audio, models.Microphone, err)
+			})
+			g.audioStr.SetMuted(g.muted)
+			g.audioStr.Start()
+			audioOK = true
 		}
-		g.audioStr = media.NewStreamer(ctx, fr, g.pc.AudioTrack(), g.log, func(err error) {
-			g.handleEnd(models.Audio, models.Microphone, err)
-		})
-		g.audioStr.SetMuted(g.muted)
-		g.audioStr.Start()
 	}
 	if streams.Video != nil {
 		fps := g.srcEncOpt.VideoFPS
 		if fps <= 0 {
 			fps = 30
 		}
-		fr, err := media.NewVP8FrameReader(streams.Video, fps)
-		if err != nil {
-			if g.audioStr != nil {
-				g.audioStr.Stop()
-				g.audioStr = nil
-			}
-			_ = streams.Close()
-			return err
+		fr, frErr := media.NewVP8FrameReader(streams.Video, fps)
+		if frErr != nil {
+			g.log.Debug("video track unavailable, skipping", slog.Any("err", frErr))
+		} else {
+			g.videoStr = media.NewStreamer(ctx, fr, g.pc.VideoTrack(), g.log, func(err error) {
+				g.handleEnd(models.Video, models.Camera, err)
+			})
+			g.videoStr.SetMuted(g.videoOff)
+			g.videoStr.Start()
+			videoOK = true
 		}
-		g.videoStr = media.NewStreamer(ctx, fr, g.pc.VideoTrack(), g.log, func(err error) {
-			g.handleEnd(models.Video, models.Camera, err)
-		})
-		g.videoStr.SetMuted(g.videoOff)
-		g.videoStr.Start()
+	}
+	if !audioOK && !videoOK {
+		_ = streams.Close()
+		return fmt.Errorf("%w: source has no playable audio or video stream", models.ErrFile)
 	}
 	return nil
 }

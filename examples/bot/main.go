@@ -108,7 +108,7 @@ func main() {
 		log.Fatalf("client.Connect: %v", err)
 	}
 	// 4. Stream.
-	if err = client.SetStreamSources(chatID, gotgcall.FromFile(source)); err != nil {
+	if err = client.SetStreamSources(chatID, gotgcall.FromFile(source, gotgcall.EncodeOptions{})); err != nil {
 		log.Fatalf("set source: %v", err)
 	}
 	stop := make(chan os.Signal, 1)

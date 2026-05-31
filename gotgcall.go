@@ -8,14 +8,16 @@
 //	params, _ := client.CreateCall(chatID)
 //	resp, _   := tg.PhoneJoinGroupCall(... Params: &DataJson{Data: params})
 //	client.Connect(chatID, resp.Updates[...].Call.Params.Data)
-//	client.SetStreamSources(chatID, gotgcall.FromFile("song.mp3"))
+//	client.SetStreamSources(chatID, gotgcall.FromFile("song.mp3", gotgcall.EncodeOptions{}))
 //
 // See README.md for the full pattern.
 package gotgcall
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
+	"os/exec"
 	"sync"
 	"sync/atomic"
 
@@ -59,9 +61,10 @@ const (
 )
 
 var (
-	FromFile  = media.FromFile
-	FromURL   = media.FromURL
-	FromShell = media.FromShell
+	FromFile   = media.FromFile
+	FromURL    = media.FromURL
+	FromShell  = media.FromShell
+	FromShells = media.FromShells
 )
 
 // --- Errors (re-export for branchable errors.Is) -------------------------------
@@ -170,11 +173,17 @@ func (c *Client) acquireCreate(chatID int64) func() {
 	return mu.Unlock
 }
 
-// New constructs a Client with the given options.
+// New constructs a Client with the given options. Fails fast if the ffmpeg
+// binary isn't on PATH (or wherever WithFFmpegPath points) so callers see
+// the error at startup rather than on first stream.
 func New(opts ...Option) (*Client, error) {
 	cfg := defaultConfig()
 	for _, opt := range opts {
 		opt(&cfg)
+	}
+	if _, err := exec.LookPath(cfg.ffmpegPath); err != nil {
+		return nil, fmt.Errorf("ffmpeg binary not found at %q: %w — install ffmpeg or override with WithFFmpegPath",
+			cfg.ffmpegPath, err)
 	}
 	media.SetFFmpegPath(cfg.ffmpegPath)
 	media.SetLogger(cfg.logger)
@@ -268,12 +277,14 @@ func (c *Client) StartRTMP(chatID int64, rtmpURL string) error {
 // --- Lifecycle: source control --------------------------------------------------
 
 // SetStreamSources installs or replaces the streaming source for chatID.
-func (c *Client) SetStreamSources(chatID int64, src Source, opt ...EncodeOptions) error {
+// Encode options (FPS, tracks, bitrates) ride along with the Source — set
+// them on the constructor (FromFile/FromURL).
+func (c *Client) SetStreamSources(chatID int64, src Source) error {
 	call, err := c.lookup(chatID)
 	if err != nil {
 		return err
 	}
-	return call.SetSource(context.Background(), src, opt...)
+	return call.SetSource(context.Background(), src)
 }
 
 func (c *Client) Pause(chatID int64) (bool, error) {

@@ -96,9 +96,21 @@ func (s *transcodeSource) open(ctx context.Context, input []string) (*Streams, e
 }
 
 func audioFFArgs(input []string, o EncodeOptions) []string {
-	args := []string{"-hide_banner", "-loglevel", "error", "-nostdin"}
+	args := []string{
+		"-hide_banner", "-loglevel", "error", "-nostdin",
+		// Drop corrupt input packets and ignore decode errors so a bad
+		// frame in the source doesn't propagate into the OGG output
+		// (which would fail OGG-page CRC validation downstream).
+		"-fflags", "+discardcorrupt+genpts",
+		"-err_detect", "ignore_err",
+	}
 	args = append(args, input...)
 	args = append(args,
+		// "?" makes mapping optional — if the source has no audio stream,
+		// ffmpeg exits cleanly instead of failing with "Output file does
+		// not contain any stream" (exit 234). startLocked sees an empty
+		// reader and skips the audio track.
+		"-map", "0:a?",
 		"-vn", "-sn", "-dn",
 		"-c:a", "libopus",
 		"-b:a", fmt.Sprintf("%dk", o.AudioBitrateKbps),
@@ -123,9 +135,14 @@ func audioFFArgs(input []string, o EncodeOptions) []string {
 func videoFFArgs(input []string, o EncodeOptions) []string {
 	rate := fmt.Sprintf("%dk", o.VideoBitrateKbps)
 	gop := strconv.Itoa(o.VideoFPS * 2)
-	args := []string{"-hide_banner", "-loglevel", "error", "-nostdin", "-re"}
+	args := []string{
+		"-hide_banner", "-loglevel", "error", "-nostdin", "-re",
+		"-fflags", "+discardcorrupt+genpts",
+		"-err_detect", "ignore_err",
+	}
 	args = append(args, input...)
 	args = append(args,
+		"-map", "0:v?",
 		"-an", "-sn", "-dn",
 		"-c:v", "libvpx",
 		"-b:v", rate, "-minrate", rate, "-maxrate", rate, "-bufsize", rate,
@@ -179,24 +196,18 @@ func ffmpegInputPrefix(input string) []string {
 
 // --- Constructors -------------------------------------------------------------
 
-func first(opt []EncodeOptions) EncodeOptions {
-	if len(opt) > 0 {
-		return opt[0]
-	}
-	return EncodeOptions{}
-}
-
 // FromFile streams any ffmpeg-decodable file (mp4, mkv, webm, mp3, wav, ...).
-// Seekable.
-func FromFile(path string, opt ...EncodeOptions) Source {
+// Seekable. Pass EncodeOptions{} for defaults.
+func FromFile(path string, opt EncodeOptions) Source {
 	prefix := ffmpegInputPrefix(path)
 	prefix = append(prefix, "-i", path)
-	return &transcodeSource{inputArgs: prefix, path: path, opt: first(opt)}
+	return &transcodeSource{inputArgs: prefix, path: path, opt: opt}
 }
 
 // FromURL streams from a URL (http(s), hls/.m3u8, rtmp, ...). Seekable.
-func FromURL(url string, opt ...EncodeOptions) Source {
+// Pass EncodeOptions{} for defaults.
+func FromURL(url string, opt EncodeOptions) Source {
 	prefix := ffmpegInputPrefix(url)
 	prefix = append(prefix, "-i", url)
-	return &transcodeSource{inputArgs: prefix, path: url, opt: first(opt)}
+	return &transcodeSource{inputArgs: prefix, path: url, opt: opt}
 }

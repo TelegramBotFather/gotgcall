@@ -14,20 +14,19 @@ import (
 
 // FromShell parses cmdline as a shell command (handling double-quoted
 // arguments) and spawns it directly via exec — NOT via /bin/sh, so shell
-// metacharacters in filenames cannot inject commands. The command MUST
-// produce Opus-in-OGG on stdout for audio:
+// metacharacters in filenames cannot inject commands.
 //
-//	ffmpeg -i <file> -c:a libopus -application audio -frame_duration 20 \
-//	       -b:a 64k -ar 48000 -ac 2 -f ogg pipe:1
+// The command must produce Opus-in-OGG on stdout for audio or VP8-in-IVF
+// for video. Missing essentials are filled in automatically:
 //
-// or VP8-in-IVF on stdout for video:
+//   - input-side fast-probe flags (`-analyzeduration 0`, `-probesize 64k`)
+//     are inserted before `-i` if absent — cuts ~1-2 s of startup latency.
+//   - output-side flags (`-c:a libopus`, `-f ogg`, opus pacing/codec
+//     params, `pipe:1`) for audio, or (`-c:v libvpx`, `-f ivf`, `pipe:1`)
+//     for video, are appended if not already present.
 //
-//	ffmpeg -i <file> -c:v libvpx -deadline realtime -b:v 800k -f ivf pipe:1
-//
-// The first token is the binary; everything after is treated as args.
-// Use track to declare which stream the command emits. Args are
-// pre-flight-checked for known-bad codec combinations (e.g. pcm_s16le on
-// an audio track) and rejected early with a clear error.
+// Raw PCM output codecs (pcm_s16le, etc.) are still rejected up front
+// since the frame readers can't parse them.
 func FromShell(cmdline string, track Track) Source {
 	tokens := tokenizeShell(cmdline)
 	if len(tokens) == 0 {
@@ -38,19 +37,102 @@ func FromShell(cmdline string, track Track) Source {
 	}
 	return &shellSource{
 		binary: tokens[0],
-		args:   tokens[1:],
+		args:   ensureFFmpegFlags(tokens[1:], track),
 		track:  track,
 	}
 }
 
-// FromFFmpegArgs spawns the configured ffmpeg binary (set via the Client's
-// WithFFmpegPath option or media.SetFFmpegPath) with the given args. Same
-// output-codec contract as FromShell.
-func FromFFmpegArgs(args []string, track Track) Source {
-	if err := validateOutputCodec(args, track); err != nil {
-		return &shellSource{err: err, track: track}
+// ensureFFmpegFlags injects the input-side fast-probe flags and the
+// output-side opus/VP8 essentials that the frame readers require. Anything
+// the caller already passed is left untouched.
+func ensureFFmpegFlags(args []string, track Track) []string {
+	has := make(map[string]bool, len(args))
+	hasPipe := false
+	for _, a := range args {
+		if strings.HasPrefix(a, "-") {
+			has[a] = true
+		}
+		if a == "pipe:1" || a == "-" {
+			hasPipe = true
+		}
 	}
-	return &shellSource{binary: "", args: args, track: track}
+	inputIdx := -1
+	for i, a := range args {
+		if a == "-i" {
+			inputIdx = i
+			break
+		}
+	}
+	var inputInject []string
+	if inputIdx >= 0 {
+		if !has["-analyzeduration"] {
+			inputInject = append(inputInject, "-analyzeduration", "0")
+		}
+		if !has["-probesize"] {
+			inputInject = append(inputInject, "-probesize", "64k")
+		}
+	}
+	var outputInject []string
+	switch {
+	case track.Has(TrackAudio):
+		if !has["-c:a"] && !has["-acodec"] {
+			outputInject = append(outputInject, "-c:a", "libopus")
+		}
+		if !has["-application"] {
+			outputInject = append(outputInject, "-application", "audio")
+		}
+		if !has["-frame_duration"] {
+			outputInject = append(outputInject, "-frame_duration", "20")
+		}
+		if !has["-page_duration"] {
+			outputInject = append(outputInject, "-page_duration", "20000")
+		}
+		if !has["-mapping_family"] {
+			outputInject = append(outputInject, "-mapping_family", "0")
+		}
+		if !has["-ar"] {
+			outputInject = append(outputInject, "-ar", "48000")
+		}
+		if !has["-ac"] {
+			outputInject = append(outputInject, "-ac", "2")
+		}
+		if !has["-f"] {
+			outputInject = append(outputInject, "-f", "ogg")
+		}
+	case track.Has(TrackVideo):
+		if !has["-c:v"] && !has["-vcodec"] {
+			outputInject = append(outputInject, "-c:v", "libvpx", "-deadline", "realtime")
+		}
+		if !has["-f"] {
+			outputInject = append(outputInject, "-f", "ivf")
+		}
+	}
+	if len(inputInject) == 0 && len(outputInject) == 0 && hasPipe {
+		return args
+	}
+	out := make([]string, 0, len(args)+len(inputInject)+len(outputInject)+1)
+	if inputIdx < 0 {
+		out = append(out, args...)
+	} else {
+		out = append(out, args[:inputIdx]...)
+		out = append(out, inputInject...)
+		out = append(out, args[inputIdx:]...)
+	}
+	// Pop pipe:1 if present, append output flags, then re-append pipe:1
+	// (or add it for the first time).
+	if hasPipe {
+		filtered := out[:0]
+		for _, a := range out {
+			if a == "pipe:1" {
+				continue
+			}
+			filtered = append(filtered, a)
+		}
+		out = filtered
+	}
+	out = append(out, outputInject...)
+	out = append(out, "pipe:1")
+	return out
 }
 
 // validateOutputCodec scans argv for combinations known to produce output

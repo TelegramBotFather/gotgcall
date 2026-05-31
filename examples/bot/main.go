@@ -66,31 +66,18 @@ func main() {
 		log.Printf("conn chat=%d state=%s", chat, info.State)
 	})
 
-	// Server-side state change (admin muted/unmuted us, video disabled).
-	// Wired from the gogram updates loop below via NotifyUpgrade.
-	client.OnUpgrade(func(chat int64, state gotgcall.MediaState) {
-		log.Printf("UPGRADE chat=%d muted=%v video_stopped=%v", chat, state.Muted, state.VideoStopped)
-	})
-
-	// Hook gogram updates → NotifyUpgrade. Whenever Telegram sends
-	// UpdateGroupCallParticipants and our peer is in the list with new
-	// muted/video_stopped flags, forward to the library.
+	// Server-side mute/video changes (admin muted us, etc.) come in through
+	// your gogram UpdateGroupCallParticipants handler. React directly with
+	// client.Pause / client.Resume — the lib stays out of MTProto.
 	tg.AddRawHandler(&telegram.UpdateGroupCallParticipants{}, func(u telegram.Update, _ *telegram.Client) error {
 		upd, ok := u.(*telegram.UpdateGroupCallParticipants)
 		if !ok {
 			return nil
 		}
 		for _, p := range upd.Participants {
-			// In real code, compare p.Peer to your own user/channel id. For
-			// brevity, we accept any participant change here.
+			// In real code, compare p.Peer to your own user/channel id and
+			// inspect p.Muted / p.CanSelfUnmute to call client.Pause/Resume.
 			_ = p
-			client.NotifyUpgrade(chatID, gotgcall.MediaState{
-				// Fill these from the participant struct fields supplied by
-				// your gogram version. Field names vary by layer.
-				// Example:
-				//   Muted:        p.Muted,
-				//   VideoStopped: p.VideoStopped,
-			})
 		}
 		return nil
 	})

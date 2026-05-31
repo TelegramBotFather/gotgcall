@@ -90,21 +90,6 @@ func (o EncodeOptions) withDefaults() EncodeOptions {
 	return o
 }
 
-// RawAudioFormat describes raw PCM fed to FromRawPCM.
-type RawAudioFormat struct {
-	SampleFmt  string // ffmpeg sample fmt, default "s16le"
-	SampleRate int    // e.g. 48000; default 48000
-	Channels   int    // e.g. 2; default 2
-}
-
-// RawVideoFormat describes raw frames fed to FromRawVideo.
-type RawVideoFormat struct {
-	PixelFmt string // ffmpeg pixel fmt, default "yuv420p"
-	Width    int    // required
-	Height   int    // required
-	FPS      int    // default 30
-}
-
 // ffmpeg binary path; configurable via SetFFmpegPath. Default "ffmpeg".
 var ffmpegBinary atomic.Value
 

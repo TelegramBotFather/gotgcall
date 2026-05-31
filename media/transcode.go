@@ -17,11 +17,10 @@ import (
 var ErrNotSeekable = errors.New("media: source is not seekable")
 
 // transcodeSource runs one or two ffmpeg processes to produce ogg/Opus and
-// ivf/VP8 streams from an arbitrary input.
+// ivf/VP8 streams from a file or URL input.
 type transcodeSource struct {
-	stdin     stdio.Reader // wired to ffmpeg stdin (mutually exclusive with two-track)
-	path      string       // plain file or URL; set => seekable
-	inputArgs []string     // ffmpeg args up through "-i <something>"
+	path      string   // plain file or URL; set => seekable
+	inputArgs []string // ffmpeg args up through "-i <something>"
 	opt       EncodeOptions
 }
 
@@ -58,9 +57,6 @@ func (s *transcodeSource) OpenAt(ctx context.Context, offset time.Duration) (*St
 
 func (s *transcodeSource) open(ctx context.Context, input []string) (*Streams, error) {
 	o := s.opt.withDefaults()
-	if s.stdin != nil && o.Tracks.Has(TrackAudio) && o.Tracks.Has(TrackVideo) {
-		return nil, errors.New("media: reader source cannot feed both audio and video; pick one track or use FromFile/FromURL")
-	}
 	var closers []stdio.Closer
 	closeAll := func() error {
 		var firstErr error
@@ -72,16 +68,6 @@ func (s *transcodeSource) open(ctx context.Context, input []string) (*Streams, e
 		return firstErr
 	}
 	start := func(args []string) (stdio.Reader, error) {
-		// For stdin-fed inputs we use a local wrapper that also pipes stdin;
-		// otherwise we use io.ShellReader which gives us a stderr ring buffer.
-		if s.stdin != nil {
-			r, err := newStdinShellReader(ctx, ffmpegPath(), args, s.stdin)
-			if err != nil {
-				return nil, err
-			}
-			closers = append(closers, r)
-			return r, nil
-		}
 		r, err := gtio.NewShellReader(ctx, ffmpegPath(), args, getLogger())
 		if err != nil {
 			return nil, err
@@ -213,103 +199,4 @@ func FromURL(url string, opt ...EncodeOptions) Source {
 	prefix := ffmpegInputPrefix(url)
 	prefix = append(prefix, "-i", url)
 	return &transcodeSource{inputArgs: prefix, path: url, opt: first(opt)}
-}
-
-// FromReader transcodes from an io.Reader via ffmpeg stdin. A single stdin
-// pipe cannot feed two encoders; set opt.Tracks to TrackAudio or TrackVideo,
-// or switch to FromFile/FromURL.
-func FromReader(r stdio.Reader, opt ...EncodeOptions) Source {
-	return &transcodeSource{
-		inputArgs: []string{"-i", "pipe:0"},
-		stdin:     r,
-		opt:       first(opt),
-	}
-}
-
-// FromRawPCM encodes raw PCM audio (no container) into Opus via ffmpeg.
-func FromRawPCM(r stdio.Reader, f RawAudioFormat, opt ...EncodeOptions) Source {
-	if f.SampleFmt == "" {
-		f.SampleFmt = "s16le"
-	}
-	if f.SampleRate == 0 {
-		f.SampleRate = models.OpusSampleRate
-	}
-	if f.Channels == 0 {
-		f.Channels = models.DefaultChannelCount
-	}
-	o := first(opt)
-	o.Tracks = TrackAudio
-	return &transcodeSource{
-		inputArgs: []string{
-			"-f", f.SampleFmt,
-			"-ar", strconv.Itoa(f.SampleRate),
-			"-ac", strconv.Itoa(f.Channels),
-			"-i", "pipe:0",
-		},
-		stdin: r,
-		opt:   o,
-	}
-}
-
-// FromRawVideo encodes raw video frames (no container) into VP8 via ffmpeg.
-func FromRawVideo(r stdio.Reader, f RawVideoFormat, opt ...EncodeOptions) Source {
-	if f.PixelFmt == "" {
-		f.PixelFmt = "yuv420p"
-	}
-	if f.FPS == 0 {
-		f.FPS = 30
-	}
-	o := first(opt)
-	o.Tracks = TrackVideo
-	if f.Width != 0 {
-		o.VideoWidth = f.Width
-	}
-	if f.Height != 0 {
-		o.VideoHeight = f.Height
-	}
-	o.VideoFPS = f.FPS
-	return &transcodeSource{
-		inputArgs: []string{
-			"-f", "rawvideo",
-			"-pix_fmt", f.PixelFmt,
-			"-s", fmt.Sprintf("%dx%d", f.Width, f.Height),
-			"-r", strconv.Itoa(f.FPS),
-			"-i", "pipe:0",
-		},
-		stdin: r,
-		opt:   o,
-	}
-}
-
-// --- Passthrough --------------------------------------------------------------
-
-type passthroughSource struct {
-	audio stdio.Reader
-	video stdio.Reader
-}
-
-func (s *passthroughSource) Tracks() Track {
-	var t Track
-	if s.audio != nil {
-		t |= TrackAudio
-	}
-	if s.video != nil {
-		t |= TrackVideo
-	}
-	return t
-}
-
-func (s *passthroughSource) Open(_ context.Context) (*Streams, error) {
-	return &Streams{Audio: s.audio, Video: s.video}, nil
-}
-
-// FromOggOpus serves a pre-encoded ogg/Opus stream directly (no ffmpeg).
-func FromOggOpus(r stdio.Reader) Source { return &passthroughSource{audio: r} }
-
-// FromIVF serves a pre-encoded IVF/VP8 stream directly (no ffmpeg).
-func FromIVF(r stdio.Reader) Source { return &passthroughSource{video: r} }
-
-// FromEncoded serves both a pre-encoded ogg/Opus and IVF/VP8 stream.
-func FromEncoded(ogg, ivf stdio.Reader) Source {
-	return &passthroughSource{audio: ogg, video: ivf}
 }

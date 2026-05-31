@@ -173,6 +173,12 @@ func (r *RTMPCall) Stop() error {
 	}
 	r.mu.Lock()
 	r.stopFFmpegLocked()
+	r.src = nil
+	r.srcPath = nil
+	r.resumeMs = 0
+	r.elapsedMs.Store(0)
+	r.paused = false
+	r.muted = false
 	r.mu.Unlock()
 	return nil
 }

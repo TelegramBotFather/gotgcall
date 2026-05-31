@@ -32,8 +32,6 @@ type (
 	Source         = media.Source
 	SeekableSource = media.SeekableSource
 	EncodeOptions  = media.EncodeOptions
-	RawAudioFormat = media.RawAudioFormat
-	RawVideoFormat = media.RawVideoFormat
 	Track          = media.Track
 
 	StreamType  = models.StreamType
@@ -61,16 +59,9 @@ const (
 )
 
 var (
-	FromFile       = media.FromFile
-	FromURL        = media.FromURL
-	FromReader     = media.FromReader
-	FromOggOpus    = media.FromOggOpus
-	FromIVF        = media.FromIVF
-	FromEncoded    = media.FromEncoded
-	FromRawPCM     = media.FromRawPCM
-	FromRawVideo   = media.FromRawVideo
-	FromShell      = media.FromShell
-	FromFFmpegArgs = media.FromFFmpegArgs
+	FromFile  = media.FromFile
+	FromURL   = media.FromURL
+	FromShell = media.FromShell
 )
 
 // --- Errors (re-export for branchable errors.Is) -------------------------------
@@ -161,7 +152,6 @@ type Client struct {
 	disp               *utils.Dispatcher
 	onStreamEnd        func(chatID int64, t StreamType, d Device, err error)
 	onConnectionChange func(chatID int64, info NetworkInfo)
-	onUpgrade          func(chatID int64, state MediaState)
 	calls              sync.Map // map[int64]instances.Call
 	createMu           sync.Map // map[int64]*sync.Mutex — gates CreateCall/StartRTMP per chat
 	cfg                config
@@ -318,13 +308,16 @@ func (c *Client) Unmute(chatID int64) (bool, error) {
 	return call.Unmute()
 }
 
-// Stop tears down the call. After Stop the chatID can be re-used.
+// Stop tears down the call and clears every per-chat scrap of state the
+// library kept (call instance, create-mutex). After Stop the chatID can be
+// re-used cleanly.
 func (c *Client) Stop(chatID int64) error {
 	call, err := c.lookup(chatID)
 	if err != nil {
 		return err
 	}
 	c.calls.Delete(chatID)
+	c.createMu.Delete(chatID)
 	return call.Stop()
 }
 
@@ -390,34 +383,6 @@ func (c *Client) OnConnectionChange(fn func(chatID int64, info NetworkInfo)) {
 	c.cbMu.Lock()
 	c.onConnectionChange = fn
 	c.cbMu.Unlock()
-}
-
-// OnUpgrade fires when the server reports a change in our media state
-// (e.g. an admin muted us, video disabled, etc.). Because the library is
-// blob-only it cannot observe MTProto updates on its own; the caller
-// forwards them via NotifyUpgrade from their own gogram update handler.
-func (c *Client) OnUpgrade(fn func(chatID int64, state MediaState)) {
-	c.cbMu.Lock()
-	c.onUpgrade = fn
-	c.cbMu.Unlock()
-}
-
-// NotifyUpgrade forwards a server-side media-state change to OnUpgrade.
-// Call this from your gogram updates handler when you see an
-// UpdateGroupCallParticipants event for your own peer with new
-// muted/video_stopped flags. The library will fan the event out to the
-// dispatcher so the callback runs without blocking your update loop.
-func (c *Client) NotifyUpgrade(chatID int64, state MediaState) {
-	if c.closed.Load() {
-		return
-	}
-	c.cbMu.RLock()
-	fn := c.onUpgrade
-	c.cbMu.RUnlock()
-	if fn == nil || c.disp == nil {
-		return
-	}
-	c.disp.Submit(func() { fn(chatID, state) })
 }
 
 // --- internals -----------------------------------------------------------------

@@ -18,18 +18,17 @@ ffmpeg must be on `PATH` at runtime (or set `gotgcall.WithFFmpegPath("/path/to/f
 
 ## Sources
 
-Like ntgcalls, you point the library at any input ffmpeg can decode:
+Three constructors, all targeting Opus-in-OGG (audio) or VP8-in-IVF (video):
 
 ```go
-gotgcall.FromFile("song.mp3")
-gotgcall.FromURL("https://stream.example.com/radio.m3u8")
-gotgcall.FromReader(r)                                // ffmpeg stdin
-gotgcall.FromOggOpus(r) / FromIVF(r) / FromEncoded(a, v)   // already encoded
-gotgcall.FromRawPCM(r, gotgcall.RawAudioFormat{SampleRate: 48000, Channels: 2})
-gotgcall.FromRawVideo(r, gotgcall.RawVideoFormat{Width: 1280, Height: 720, FPS: 30})
-gotgcall.FromShell(cmd, gotgcall.TrackAudio)          // your own ffmpeg command
-gotgcall.FromFFmpegArgs(args, gotgcall.TrackAudio)    // pre-tokenized args
+gotgcall.FromFile("song.mp3")                        // local file
+gotgcall.FromURL("https://stream.example.com/...")   // HTTP / HLS / RTMP
+gotgcall.FromShell("ffmpeg -i thing.mp3 ...", gotgcall.TrackAudio)
 ```
+
+Defaults to **audio only**. Pass `EncodeOptions{Tracks: gotgcall.TrackAudio | gotgcall.TrackVideo}` to also extract video.
+
+`FromShell` accepts a partial command — missing essentials (`-analyzeduration 0`, `-probesize 64k` before `-i`; `-c:a libopus`, `-f ogg`, opus pacing, `pipe:1` after) are filled in automatically. Raw-PCM output codecs are rejected up front; the frame readers can't parse them.
 
 ## Quick start
 
@@ -98,12 +97,11 @@ gotgcall.New(
 ```go
 client.OnStreamEnd(func(chat int64, t StreamType, d Device, err error) { ... })
 client.OnConnectionChange(func(chat int64, info NetworkInfo) { ... })
-client.OnUpgrade(func(chat int64, state MediaState) { ... })
 ```
 
 All callbacks fire from a single dispatcher goroutine so they can safely re-enter the API (e.g. call `client.Stop` from inside `OnStreamEnd`).
 
-`OnUpgrade` is server-side state change (admin muted you, video disabled, etc.). Because we don't see MTProto updates, you forward them via `client.NotifyUpgrade(chatID, MediaState{...})` from your gogram update handler.
+Server-side media-state changes (admin mute, video disabled) come in through your own gogram `UpdateGroupCallParticipants` handler — react there by calling `client.Pause` / `client.Resume` directly. The library deliberately stays out of MTProto.
 
 ## Why pure Go
 

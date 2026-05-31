@@ -289,6 +289,12 @@ func (g *GroupCall) Stop() error {
 	}
 	g.mu.Lock()
 	g.stopStreamersLocked()
+	g.src = nil
+	g.srcEncOpt = media.EncodeOptions{}
+	g.resumeMs = 0
+	g.paused = false
+	g.muted = false
+	g.videoOff = false
 	g.mu.Unlock()
 	return g.pc.Close()
 }

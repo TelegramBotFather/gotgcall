@@ -98,6 +98,25 @@ func main() {
 		log.Printf("conn chat=%d state=%s", chat, info.State)
 	})
 
+	// Outgoing media-state transitions (muted / paused / video-stopped).
+	// Wire this into your MTProto layer to flip the call participant's
+	// video_stopped / muted flags via phone.EditGroupCallParticipant —
+	// without it, an audio-only /play followed by a /vplay on the SAME
+	// call may have its video silently dropped by Telegram's SFU because
+	// the participant was never marked as a video sender.
+	client.OnMediaStateChange(func(chat int64, state gotgcall.MediaState) {
+		log.Printf("media state chat=%d muted=%v paused=%v video_stopped=%v",
+			chat, state.Muted, state.Paused, state.VideoStopped)
+		// In a real bot:
+		//   tg.PhoneEditGroupCallParticipant(&telegram.PhoneEditGroupCallParticipantParams{
+		//       Call:          inputCall,
+		//       Participant:   &telegram.InputPeerSelf{},
+		//       Muted:         state.Muted,
+		//       VideoStopped:  state.VideoStopped,
+		//       VideoPaused:   state.Paused,
+		//   })
+	})
+
 	// React to admin mute / video-disable events server-side. gotgcall stays
 	// out of MTProto, so we wire this in the bot.
 	tg.AddRawHandler(&telegram.UpdateGroupCallParticipants{}, func(u telegram.Update, _ *telegram.Client) error {

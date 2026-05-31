@@ -11,6 +11,13 @@ import (
 	"github.com/annihilatorrrr/gotgcall/wrtc/jsonparams"
 )
 
+// connStateFn is the user-side state-change delegate. Stored under
+// PeerConnection.onStateChange and invoked by handleStateChange. Per-PC
+// keepalive + liveness lifecycle is owned by the Factory-shared
+// FactoryMonitor (1 goroutine for all PCs), so handleStateChange itself
+// is now a thin forwarder.
+type connStateFn func(models.ConnState)
+
 // defaultSTUNServers gives pion at least one reflexive-address server so it
 // can gather srflx candidates behind NATs. Without these, only host
 // candidates are emitted and any non-LAN connection fails ICE.
@@ -28,7 +35,19 @@ type PeerConnection struct {
 	audio *webrtc.TrackLocalStaticSample
 	video *webrtc.TrackLocalStaticSample
 
+	audioSender *webrtc.RTPSender
+	videoSender *webrtc.RTPSender
+
+	// monitor is the Factory-shared keepalive + liveness goroutine. We
+	// hold the reference so Close can Unregister; there's no per-PC
+	// goroutine to stop (the Factory's monitor handles all PCs).
+	monitor *FactoryMonitor
+
 	log *slog.Logger
+
+	onStateChange connStateFn
+
+	onStateChangeMu sync.RWMutex
 
 	mu        sync.Mutex
 	audioSSRC uint32
@@ -112,15 +131,57 @@ func NewPeerConnection(f *Factory, log *slog.Logger) (*PeerConnection, error) {
 		_ = pc.Close()
 		return nil, fmt.Errorf("%w: audio sender returned no SSRC", models.ErrInternal)
 	}
+	// Symmetric video guard. In practice pion v4 assigns the encoding SSRC
+	// during AddTrack so this never trips, but if it ever returned 0 (pion
+	// regression, upstream API change) FromOfferSDP would emit an empty
+	// ssrc-groups — recreating exactly the v0.6.0/v0.6.2 "video declared
+	// but never reaches participants" bug. Cheap defense.
+	if videoSSRC == 0 {
+		_ = pc.Close()
+		return nil, fmt.Errorf("%w: video sender returned no SSRC", models.ErrInternal)
+	}
 
-	return &PeerConnection{
-		pc:        pc,
-		audio:     audio,
-		video:     video,
-		audioSSRC: audioSSRC,
-		videoSSRC: videoSSRC,
-		log:       log,
-	}, nil
+	peerConn := &PeerConnection{
+		pc:          pc,
+		audio:       audio,
+		video:       video,
+		audioSender: audioSender,
+		videoSender: videoSender,
+		monitor:     f.Monitor(),
+		audioSSRC:   audioSSRC,
+		videoSSRC:   videoSSRC,
+		log:         log,
+	}
+	// Register with the Factory-shared monitor. The monitor's tick loop
+	// skips PCs that aren't Connected, so we can register here (before
+	// Connect) without false-tripping the liveness watchdog. Unregister
+	// happens in Close.
+	if peerConn.monitor != nil {
+		peerConn.monitor.Register(peerConn)
+	}
+
+	// Single OnConnectionStateChange registration that forwards to the
+	// user-side delegate set via PeerConnection.OnConnectionStateChange.
+	// pion only supports one handler per PC, so we must funnel everything
+	// through here.
+	pc.OnConnectionStateChange(func(s webrtc.PeerConnectionState) {
+		peerConn.handleStateChange(translateState(s))
+	})
+
+	return peerConn, nil
+}
+
+// handleStateChange forwards pion's state transitions to the user-side
+// delegate. The shared FactoryMonitor decides per-tick whether to act on
+// each PC's state (skip / keepalive / liveness check), so there's no
+// per-PC goroutine to start or stop here.
+func (p *PeerConnection) handleStateChange(state models.ConnState) {
+	p.onStateChangeMu.RLock()
+	fn := p.onStateChange
+	p.onStateChangeMu.RUnlock()
+	if fn != nil {
+		fn(state)
+	}
 }
 
 // senderSSRC returns the SSRC pion has chosen for the sender's first
@@ -177,10 +238,15 @@ func (p *PeerConnection) VideoTrack() *webrtc.TrackLocalStaticSample { return p.
 
 // OnConnectionStateChange registers fn for pion state transitions.
 // The callback fires from a pion goroutine; fn must not block.
+//
+// pion only supports one OnConnectionStateChange handler per PC and we
+// already installed our internal lifecycle handler in NewPeerConnection.
+// This method stores fn as a delegate that the internal handler calls
+// after its own bookkeeping.
 func (p *PeerConnection) OnConnectionStateChange(fn func(models.ConnState)) {
-	p.pc.OnConnectionStateChange(func(s webrtc.PeerConnectionState) {
-		fn(translateState(s))
-	})
+	p.onStateChangeMu.Lock()
+	p.onStateChange = fn
+	p.onStateChangeMu.Unlock()
 }
 
 func translateState(s webrtc.PeerConnectionState) models.ConnState {
@@ -206,5 +272,8 @@ func (p *PeerConnection) Close() error {
 	}
 	p.closed = true
 	p.mu.Unlock()
+	if p.monitor != nil {
+		p.monitor.Unregister(p)
+	}
 	return p.pc.Close()
 }

@@ -108,6 +108,11 @@ client.OnStreamEnd(func(chat int64, t gotgcall.StreamType, d gotgcall.Device, er
 client.OnConnectionChange(func(chat int64, info gotgcall.NetworkInfo) {
     log.Printf("conn state: %s", info.State)
 })
+client.OnMediaStateChange(func(chat int64, state gotgcall.MediaState) {
+    // Mirror to phone.EditGroupCallParticipant so Telegram knows the
+    // bot just toggled video/mute/pause. Required for /play → /vplay
+    // to actually show video to other participants.
+})
 
 // 1. Local-side JSON.
 localParams, _ := client.CreateCall(chatID)
@@ -265,7 +270,7 @@ gotgcall.New(
 | `WithDispatchBuffer` | 256 | Size of the single callback-dispatcher channel. Larger absorbs bursts of state changes before the consumer drains. |
 | `WithICEServers` | 3× Google STUN | Replaces the default list. Add TURN entries for users behind symmetric NAT / restrictive firewalls. |
 | `WithNetworkTypes` | UDP4 only | Override the ICE candidate network-type whitelist. Enable IPv6 / TCP for restrictive environments where UDP4 is blocked. |
-| `WithICETimeouts` | 30 s / 60 s / 2 s | `(disconnect, failed, keepalive)`. Longer values tolerate brief connectivity drops without killing the call. Pass `0` for any value to keep the default. |
+| `WithICETimeouts` | 60 s / 120 s / 2 s | `(disconnect, failed, keepalive)`. Bumped 2× from gortc's 30/60/2 baseline in v0.6.4 because Telegram's edge wobble on rejoin frequently takes 60-90 s to settle on a working candidate pair. Pass `0` for any value to keep the default; ultra-responsive UIs can shorten back to 30/60. |
 
 ### Enabling debug logs
 
@@ -382,6 +387,15 @@ client.OnStreamEnd(func(chat int64, t StreamType, d Device, err error) {
 client.OnConnectionChange(func(chat int64, info NetworkInfo) {
     // info.State: Connecting | Connected | Failed | Closed | Timeout
 })
+
+client.OnMediaStateChange(func(chat int64, state MediaState) {
+    // Fires on every Muted / Paused / VideoStopped transition. Wire to
+    // your MTProto layer's phone.EditGroupCallParticipant so Telegram
+    // mirrors the change for other participants. Critical for the
+    // /play → /vplay swap: without flipping VideoStopped=false on the
+    // server side, Telegram's SFU silently drops the late video even
+    // though our RTP is correct.
+})
 ```
 
 All callbacks fire on a single dispatcher goroutine, so you can safely re-enter the API from inside (e.g. call `client.Stop(chat)` from inside `OnStreamEnd`). If your callback panics it is recovered and logged; the dispatcher keeps running.
@@ -417,7 +431,7 @@ All errors are sentinels — branch with `errors.Is`:
 | --- | --- |
 | `ErrConnectionExists` | `CreateCall`/`StartRTMP` for a chatID that already has a live call. |
 | `ErrConnectionNotFound` | Any method called with an unknown chatID, or after `Stop`. |
-| `ErrConnectionTimeout` | Declared for future use (currently surfaced via `OnConnectionChange(Failed)` after pion's 60s ICE-failed timeout). |
+| `ErrConnectionTimeout` | Declared for future use (currently surfaced via `OnConnectionChange(Failed)` after pion's 120 s ICE-failed timeout). |
 | `ErrConnectionFailed` | Same — declared for branching; current ICE-failed manifests as `OnConnectionChange(Failed)`. |
 | `ErrInvalidParams` | Malformed remote JSON in `Connect` (missing ufrag/pwd/fingerprints), or `FromShell` with empty/invalid command. |
 | `ErrFFmpegSpawn` | `exec.Cmd.Start` failed (binary missing / permission denied / OS resource exhaustion). |
@@ -447,7 +461,7 @@ All errors are sentinels — branch with `errors.Is`:
 
 **TURN.** Not configured by default. Telegram's SFU exposes reflexive candidates in the JOIN response and our outbound NAT path is normally enough.
 
-**ICE timeouts.** Disconnect grace = 30s, failed declaration = 60s, keepalive = 2s. Matches gortc's production values. Pion surfaces failure via `OnConnectionStateChange(Failed)`.
+**ICE timeouts.** Disconnect grace = 60 s, failed declaration = 120 s, keepalive = 2 s. Bumped 2× from gortc's 30/60/2 baseline in v0.6.4 — in practice Telegram's edge wobble on rejoin takes 60-90 s to settle on a working candidate pair, and the shorter window made pion declare Failed before the SFU finished steering. Override via `WithICETimeouts` for ultra-responsive UIs (shorter) or extra-unstable networks (longer). Pion surfaces failure via `OnConnectionStateChange(Failed)`.
 
 **UDP mux.** Default behavior: each call binds its own UDP socket. Enable `WithSharedUDPMux()` to route every call through one shared `udp4:0` socket. Useful at 100+ concurrent calls where you don't want N ephemeral ports open.
 

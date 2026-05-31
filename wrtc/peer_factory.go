@@ -25,11 +25,22 @@ type Factory struct {
 	api              *webrtc.API
 	log              *slog.Logger
 	certPool         *CertPool
+	monitor          *FactoryMonitor
 	settings         webrtc.SettingEngine
 	iceServers       []webrtc.ICEServer
 	mu               sync.Mutex
 	closed           bool
 	logICECandidates bool
+}
+
+// Monitor returns the per-Factory shared monitor goroutine that drives
+// video keepalive padding + RTP liveness watchdog for every PC created
+// by this Factory. NewPeerConnection registers itself; Close
+// unregisters. Single goroutine handles N concurrent calls.
+func (f *Factory) Monitor() *FactoryMonitor {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.monitor
 }
 
 // ICEServers returns the configured ICE server list (custom from
@@ -129,6 +140,17 @@ func NewFactory(opts FactoryOptions) (*Factory, error) {
 		keepalive = 2 * time.Second // unchanged — more-frequent keepalive helps NAT bindings
 	}
 	settings.SetICETimeouts(disconnect, failed, keepalive)
+	// Zero per-candidate-type acceptance windows. pion's defaults stagger
+	// host / srflx / prflx / relay acceptance to give "better" types a head
+	// start; the ntgcalls equivalent (kMinimumStepDelay in
+	// native_connection.cpp:97) zeros these because Telegram's edge mixers
+	// respond fast and waiting on type windows just inflates first-media
+	// latency, especially on rejoins to the same chat. Combine with the
+	// UDP4-only NetworkTypes default above for the snappiest ICE.
+	settings.SetHostAcceptanceMinWait(0)
+	settings.SetSrflxAcceptanceMinWait(0)
+	settings.SetPrflxAcceptanceMinWait(0)
+	settings.SetRelayAcceptanceMinWait(0)
 	// Skip virtual / VPN interfaces — gathering candidates on them slows ICE
 	// and produces unreachable pairs. Captured by the closure once; each
 	// candidate-gather pass does N substring scans rather than re-walking
@@ -139,9 +161,15 @@ func NewFactory(opts FactoryOptions) (*Factory, error) {
 		settings:         settings,
 		log:              log,
 		certPool:         NewCertPool(opts.CertPoolSize, log),
+		monitor:          NewFactoryMonitor(log),
 		iceServers:       opts.ICEServers,
 		logICECandidates: opts.LogICECandidates,
 	}
+	// Single goroutine drives keepalive + liveness for every PC this
+	// Factory ever produces; PCs Register at NewPeerConnection and
+	// Unregister at Close. With 100 concurrent calls per Client this is
+	// 1 goroutine instead of 100 (the v0.6.5 first draft had one per PC).
+	f.monitor.Start()
 	if opts.SharedUDPMux {
 		lc, err := net.ListenPacket("udp4", ":0")
 		if err != nil {
@@ -191,6 +219,13 @@ func NewFactory(opts FactoryOptions) (*Factory, error) {
 	}
 	interceptors.Add(&audioLevelInterceptorFactory{})
 	interceptors.Add(&markerClearInterceptorFactory{})
+	// Pion v4 negotiates sdes-mid in SDP but ships no built-in interceptor
+	// that actually stamps the extension on outgoing RTP — only TWCC writes
+	// extensions. Telegram's SFU may use sdes-mid for BUNDLE demux of
+	// incoming participant media, so we stamp it ourselves as
+	// defense-in-depth: mid="0" for audio, mid="1" for video, matching the
+	// transceiver order in NewPeerConnection.
+	interceptors.Add(&midStampInterceptorFactory{})
 
 	f.api = webrtc.NewAPI(
 		webrtc.WithSettingEngine(f.settings),
@@ -278,7 +313,8 @@ func (f *Factory) NewPeerConnection(cfg webrtc.Configuration) (*webrtc.PeerConne
 	return api.NewPeerConnection(cfg)
 }
 
-// Close releases the shared UDP mux (if any) and cert pool.
+// Close releases the shared UDP mux (if any), cert pool, and the per-
+// Factory monitor goroutine.
 func (f *Factory) Close() error {
 	f.mu.Lock()
 	if f.closed {
@@ -288,7 +324,11 @@ func (f *Factory) Close() error {
 	f.closed = true
 	pool := f.certPool
 	mux := f.udpMux
+	monitor := f.monitor
 	f.mu.Unlock()
+	if monitor != nil {
+		monitor.Stop()
+	}
 	if pool != nil {
 		pool.Close()
 	}

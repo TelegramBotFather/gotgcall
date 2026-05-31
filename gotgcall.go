@@ -208,9 +208,11 @@ func WithNetworkTypes(types ...NetworkType) Option {
 }
 
 // WithICETimeouts overrides pion's ICE timing. Pass 0 for any value to keep
-// the library default (30s disconnect grace / 60s failed / 2s keepalive).
-// Use longer values on unstable networks where brief connectivity drops
-// shouldn't kill the call.
+// the library default (60s disconnect grace / 120s failed / 2s keepalive,
+// bumped 2× from gortc's 30/60/2 in v0.6.4 because Telegram's edge wobble
+// on rejoin often takes 60-90s to settle). Use longer values on unstable
+// networks where brief connectivity drops shouldn't kill the call; pass
+// shorter values for ultra-responsive UIs that need faster fail-detection.
 func WithICETimeouts(disconnect, failed, keepalive time.Duration) Option {
 	return func(c *config) {
 		if disconnect > 0 {
@@ -283,6 +285,7 @@ type Client struct {
 	disp               *utils.Dispatcher
 	onStreamEnd        func(chatID int64, t StreamType, d Device, err error)
 	onConnectionChange func(chatID int64, info NetworkInfo)
+	onMediaStateChange func(chatID int64, state MediaState)
 	calls              sync.Map // map[int64]instances.Call
 	createMu           sync.Map // map[int64]*sync.Mutex — gates CreateCall/StartRTMP per chat
 	cfg                config
@@ -532,6 +535,25 @@ func (c *Client) OnConnectionChange(fn func(chatID int64, info NetworkInfo)) {
 	c.cbMu.Unlock()
 }
 
+// OnMediaStateChange registers a callback fired whenever the call's
+// outgoing media state (muted / paused / video-stopped) transitions.
+//
+// Use this to keep the Telegram-side participant flags (settable via
+// phone.editGroupCallParticipant in your MTProto layer) in sync with the
+// library-side streamer state. Most importantly: when /play (audio-only)
+// is followed by /vplay (video) on the SAME call, this fires with
+// state.VideoStopped=false, signaling that you should flip the
+// participant's video_stopped flag MTProto-side. Without that signal,
+// Telegram's SFU may drop the late video even though our RTP is correct.
+//
+// Mirror of ntgcalls' onUpgrade(MediaState) pattern. Fires on the
+// dispatcher goroutine, safe to re-enter the Client API from within.
+func (c *Client) OnMediaStateChange(fn func(chatID int64, state MediaState)) {
+	c.cbMu.Lock()
+	c.onMediaStateChange = fn
+	c.cbMu.Unlock()
+}
+
 // --- internals -----------------------------------------------------------------
 
 func (c *Client) lookup(chatID int64) (instances.Call, error) {
@@ -561,6 +583,14 @@ func (c *Client) eventsFor(chatID int64) instances.GroupCallEvents {
 			c.cbMu.RUnlock()
 			if fn != nil {
 				fn(chatID, info)
+			}
+		},
+		OnMediaStateChange: func(state models.MediaState) {
+			c.cbMu.RLock()
+			fn := c.onMediaStateChange
+			c.cbMu.RUnlock()
+			if fn != nil {
+				fn(chatID, state)
 			}
 		},
 	}

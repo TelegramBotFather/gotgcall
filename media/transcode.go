@@ -182,7 +182,13 @@ func ffmpegInputPrefix(input string) []string {
 			"-probesize", "32k",
 		}
 	}
-	return nil
+	// Local files: ffmpeg's defaults (analyzeduration=5s, probesize=5MB) add
+	// ~1-2s of startup latency before the first OGG page is produced. For
+	// common containers (mp3/m4a/webm/ogg/mp4) a 64k probe is plenty.
+	return []string{
+		"-analyzeduration", "0",
+		"-probesize", "64k",
+	}
 }
 
 // --- Constructors -------------------------------------------------------------
@@ -197,7 +203,7 @@ func first(opt []EncodeOptions) EncodeOptions {
 // FromFile streams any ffmpeg-decodable file (mp4, mkv, webm, mp3, wav, ...).
 // Seekable.
 func FromFile(path string, opt ...EncodeOptions) Source {
-	var prefix []string
+	prefix := ffmpegInputPrefix(path)
 	prefix = append(prefix, "-i", path)
 	return &transcodeSource{inputArgs: prefix, path: path, opt: first(opt)}
 }

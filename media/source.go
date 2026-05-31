@@ -83,7 +83,9 @@ func (o EncodeOptions) withDefaults() EncodeOptions {
 		o.AudioChannels = 2
 	}
 	if o.Tracks == 0 {
-		o.Tracks = TrackAudio | TrackVideo
+		// Audio-only default — both-tracks broke FromFile on audio-only inputs
+		// (video ffmpeg exited 234 → IVF parse error). Opt in via opt.Tracks.
+		o.Tracks = TrackAudio
 	}
 	return o
 }

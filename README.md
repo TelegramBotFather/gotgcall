@@ -483,7 +483,6 @@ All errors are sentinels — branch with `errors.Is`:
 - **Raw PCM/YUV is rejected at construction time.** `FromShell` validates the codec/container args and returns `ErrInvalidParams` with a useful hint pointing at `libopus`/`libvpx`.
 - **`SetStreamSources` does not wait for ICE.** It starts ffmpeg immediately. ICE/DTLS run in the background. Watch `OnConnectionChange(Failed)` if you need to react to connection failure during streaming.
 - **Pause in RTMP mode is destructive to the connection.** ffmpeg is killed; Telegram drops the RTMP ingest. Resume re-establishes from `elapsed_ms`. Listeners will see a brief silence.
-- **Don't `git add` `.refs/`, `.idea/`, or `.claude/`.** Gitignored; `.refs/ntgcalls` is a local clone kept for C++ reference reading.
 
 ## Performance vs ntgcalls
 

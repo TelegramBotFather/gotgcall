@@ -3,11 +3,17 @@
 package jsonparams
 
 // LocalParams is what we send to Telegram via phone.JoinGroupCall.
+// Field shape matches ntgcalls' getJoinPayload() output:
+//   - "ssrc" is the audio SSRC only; video SSRC is inferred server-side from
+//     the sdes-mid RTP header extension on incoming video packets.
+//   - "ssrc-groups" is always emitted (as an empty array if there are no
+//     video FID/SIM groups) to mirror ntgcalls — never as a cross-media
+//     FID:[audio, video] pair, which causes Telegram's SFU to drop video.
 type LocalParams struct {
 	Ufrag        string        `json:"ufrag"`
 	Pwd          string        `json:"pwd"`
 	Fingerprints []Fingerprint `json:"fingerprints"`
-	SSRCGroups   []SSRCGroup   `json:"ssrc-groups,omitempty"`
+	SSRCGroups   []SSRCGroup   `json:"ssrc-groups"`
 	PayloadTypes []PayloadType `json:"payload-types"`
 	RTPHdrExts   []RTPHdrExt   `json:"rtp-hdrexts"`
 	SSRC         uint32        `json:"ssrc"`

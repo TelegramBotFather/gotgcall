@@ -23,8 +23,7 @@ type GroupCallEvents struct {
 
 // GroupCall is the WebRTC call instance for one chat.
 type GroupCall struct {
-	startedAt time.Time
-	ev        GroupCallEvents
+	ev GroupCallEvents
 
 	src       media.Source
 	pc        *wrtc.PeerConnection
@@ -40,7 +39,6 @@ type GroupCall struct {
 	mu        sync.RWMutex
 	netState  atomic.Int32 // models.ConnState
 	closed    atomic.Bool
-	pausing   atomic.Bool // true while Pause is tearing down the streamer; suppresses OnStreamEnd
 	switching atomic.Bool // true while SetSource is replacing the source; suppresses OnStreamEnd for the old streamer
 	paused    bool
 	muted     bool
@@ -139,7 +137,6 @@ func (g *GroupCall) startLocked(ctx context.Context) error {
 		return fmt.Errorf("open source: %w", err)
 	}
 	g.streams = streams
-	g.startedAt = time.Now()
 
 	var audioOK, videoOK bool
 	if streams.Audio != nil {
@@ -176,6 +173,7 @@ func (g *GroupCall) startLocked(ctx context.Context) error {
 	}
 	if !audioOK && !videoOK {
 		_ = streams.Close()
+		g.streams = nil
 		return fmt.Errorf("%w: source has no playable audio or video stream", models.ErrFile)
 	}
 	return nil
@@ -198,12 +196,11 @@ func (g *GroupCall) stopStreamersLocked() {
 
 func (g *GroupCall) handleEnd(t models.StreamType, d models.Device, err error) {
 	closed := g.closed.Load()
-	pausing := g.pausing.Load()
 	switching := g.switching.Load()
 	g.log.Debug("handleEnd",
 		slog.Any("type", t), slog.Any("device", d), slog.Any("err", err),
-		slog.Bool("closed", closed), slog.Bool("pausing", pausing), slog.Bool("switching", switching))
-	if closed || pausing || switching {
+		slog.Bool("closed", closed), slog.Bool("switching", switching))
+	if closed || switching {
 		return
 	}
 	if g.disp != nil && g.ev.OnStreamEnd != nil {
@@ -242,7 +239,6 @@ func (g *GroupCall) Resume() (bool, error) {
 		return false, nil
 	}
 	g.paused = false
-	g.pausing.Store(false)
 	// If streamers exist (gate-paused), just unblock them. Otherwise the
 	// source was never started (e.g. paused before SetStreamSources) — start now.
 	if g.audioStr != nil || g.videoStr != nil {

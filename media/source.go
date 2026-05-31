@@ -133,3 +133,17 @@ func getLogger() *slog.Logger {
 	}
 	return slog.New(slog.DiscardHandler)
 }
+
+// stderrLog gates whether ShellReader tees the live ffmpeg stderr stream
+// into the package logger at Debug level. Off by default — the last 512
+// bytes of stderr are always wrapped into the exit error, which suffices
+// for crash diagnosis. Enable via gotgcall.WithFFmpegStderrLog() when you
+// need to see ffmpeg's warnings ("missing reference frame", "non-monotonic
+// dts", etc.) live while the stream runs.
+var stderrLog atomic.Bool
+
+// SetStderrLog toggles the live-tee of ffmpeg stderr to the package logger.
+func SetStderrLog(on bool) { stderrLog.Store(on) }
+
+// StderrLogEnabled reports the current setting (read by io.ShellReader).
+func StderrLogEnabled() bool { return stderrLog.Load() }

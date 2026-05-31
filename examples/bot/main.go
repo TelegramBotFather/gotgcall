@@ -1,20 +1,45 @@
-// Command bot is a SKELETON example for wiring gotgcall with gogram MTProto.
+// Command bot is a runnable example wiring gotgcall against gogram MTProto.
 //
-// The exact extraction of the response JSON from phone.JoinGroupCall depends
-// on your MTProto layer version and gogram API. This file shows the call
-// sequence; fill in the marked TODOs against the version of gogram you use.
+// Usage:
 //
-//	APP_ID=... APP_HASH=... SESSION=session.dat CHAT=-1001234 \
-//	go run . ./song.mp3
+//	# Local file (FromFile — lib builds the ffmpeg argv for you):
+//	APP_ID=12345 APP_HASH=xxx SESSION=session.dat CHAT=-1001234567890 \
+//	    go run . ./song.mp3
+//
+//	# URL / HLS / live radio (FromURL):
+//	APP_ID=... APP_HASH=... SESSION=... CHAT=... \
+//	    go run . https://stream.example.com/radio.m3u8
+//
+//	# Custom ffmpeg pipeline (FromShell — you control the argv, missing
+//	# essentials like -c:a libopus / -f ogg / pipe:1 are auto-filled):
+//	APP_ID=... APP_HASH=... SESSION=... CHAT=... \
+//	    go run . 'shell:ffmpeg -i "song.mp3" -af "atempo=1.25"'
+//
+//	# Two custom ffmpeg legs, one for audio and one for video (FromShells):
+//	APP_ID=... APP_HASH=... SESSION=... CHAT=... \
+//	    go run . 'shells:ffmpeg -i movie.mp4|ffmpeg -i movie.mp4 -vf scale=1280:720'
+//
+// Flow:
+//
+//  1. gogram fetches the full channel/chat to obtain the active group-call ref.
+//  2. gotgcall.CreateCall produces local-side JSON.
+//  3. gogram's PhoneJoinGroupCall sends that JSON to Telegram and returns
+//     Updates containing UpdateGroupCallConnection — Telegram's response JSON.
+//  4. gotgcall.Connect feeds that response back and finishes the WebRTC
+//     handshake (ICE + DTLS happen async in pion).
+//  5. gotgcall.SetStreamSources starts the streamer.
+//  6. On SIGINT, we leave the call cleanly via PhoneLeaveGroupCall.
 package main
 
 import (
 	"errors"
+	"fmt"
 	"log"
 	"log/slog"
 	"os"
 	"os/signal"
 	"strconv"
+	"strings"
 	"syscall"
 
 	"github.com/annihilatorrrr/gotgcall"
@@ -27,21 +52,17 @@ func main() {
 		log.Fatal("usage: bot <file-or-url>")
 	}
 	source := os.Args[1]
-	appID, _ := strconv.Atoi(os.Getenv("APP_ID"))
-	appHash := os.Getenv("APP_HASH")
-	session := envOr("SESSION", "session.dat")
-	chatRaw := os.Getenv("CHAT")
-	if appID == 0 || appHash == "" || chatRaw == "" {
-		log.Fatal("APP_ID, APP_HASH, CHAT env vars are required")
-	}
-	chatID, err := strconv.ParseInt(chatRaw, 10, 64)
+
+	cfg, err := loadConfig()
 	if err != nil {
-		log.Fatalf("CHAT must be an int64 chat id: %v", err)
+		log.Fatalf("config: %v", err)
 	}
+
+	// --- gogram (MTProto) -----------------------------------------------------
 	tg, err := telegram.NewClient(telegram.ClientConfig{
-		AppID:   int32(appID),
-		AppHash: appHash,
-		Session: session,
+		AppID:   int32(cfg.AppID),
+		AppHash: cfg.AppHash,
+		Session: cfg.Session,
 	})
 	if err != nil {
 		log.Fatalf("create tg client: %v", err)
@@ -49,78 +70,131 @@ func main() {
 	if err = tg.Connect(); err != nil {
 		log.Fatalf("connect: %v", err)
 	}
+	defer tg.Disconnect() //nolint:errcheck
+
+	// --- gotgcall (WebRTC) ----------------------------------------------------
 	client, err := gotgcall.New(
-		gotgcall.WithLogger(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))),
+		gotgcall.WithLogger(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
+			Level: slog.LevelInfo,
+		}))),
 	)
 	if err != nil {
 		log.Fatalf("new gotgcall: %v", err)
 	}
 	defer client.Close()
-	// Fires on EOF, ffmpeg crash, or Stop. err == nil for clean EOF/Stop.
+
+	// Stream lifecycle events. err == nil for clean EOF/Stop, non-nil for
+	// ffmpeg crash or unexpected end. In a music bot, this is where you call
+	// SetStreamSources with the next queue entry, or Stop+Leave if the queue
+	// is empty.
 	client.OnStreamEnd(func(chat int64, t gotgcall.StreamType, d gotgcall.Device, err error) {
 		log.Printf("stream end chat=%d type=%s device=%s err=%v", chat, t, d, err)
 	})
 
-	// ICE/DTLS state transitions: Connecting → Connected → Failed/Closed.
+	// ICE/DTLS state. The Connected transition means media is flowing; Failed
+	// means ICE couldn't establish (firewall, expired creds, etc.) — at that
+	// point the safe move is Stop + re-join.
 	client.OnConnectionChange(func(chat int64, info gotgcall.NetworkInfo) {
 		log.Printf("conn chat=%d state=%s", chat, info.State)
 	})
 
-	// Server-side mute/video changes (admin muted us, etc.) come in through
-	// your gogram UpdateGroupCallParticipants handler. React directly with
-	// client.Pause / client.Resume — the lib stays out of MTProto.
+	// React to admin mute / video-disable events server-side. gotgcall stays
+	// out of MTProto, so we wire this in the bot.
 	tg.AddRawHandler(&telegram.UpdateGroupCallParticipants{}, func(u telegram.Update, _ *telegram.Client) error {
 		upd, ok := u.(*telegram.UpdateGroupCallParticipants)
 		if !ok {
 			return nil
 		}
+		me, err := tg.GetMe()
+		if err != nil {
+			return nil //nolint:nilerr
+		}
 		for _, p := range upd.Participants {
-			// In real code, compare p.Peer to your own user/channel id and
-			// inspect p.Muted / p.CanSelfUnmute to call client.Pause/Resume.
-			_ = p
+			user, ok := p.Peer.(*telegram.PeerUser)
+			if !ok || user.UserID != me.ID {
+				continue
+			}
+			switch {
+			case p.Muted && !p.CanSelfUnmute:
+				log.Println("admin muted us; pausing")
+				_, _ = client.Pause(cfg.ChatID)
+			case !p.Muted:
+				log.Println("unmuted; resuming")
+				_, _ = client.Resume(cfg.ChatID)
+			}
 		}
 		return nil
 	})
-	// 1. Local-side JSON.
-	localParams, err := client.CreateCall(chatID)
+
+	// 1. Resolve the active group call for the chat.
+	inputCall, err := resolveActiveCall(tg, cfg.ChatID)
+	if err != nil {
+		log.Fatalf("resolve call: %v", err)
+	}
+
+	// 2. Build local-side params.
+	localParams, err := client.CreateCall(cfg.ChatID)
 	if err != nil {
 		log.Fatalf("create call: %v", err)
 	}
 	log.Printf("local params: %d bytes", len(localParams))
-	// 2. Drive Telegram via your MTProto layer.
-	//    See gogram docs for the exact response shape on your version.
-	//    Typical sequence:
-	//
-	//      inputCall := /* lookup phone.GetGroupCall(chat) */
-	//      me, _   := tg.GetMe()
-	//      updates, _ := tg.PhoneJoinGroupCall(&telegram.PhoneJoinGroupCallParams{
-	//          Call:   inputCall,
-	//          JoinAs: &telegram.InputPeerUser{UserID: me.ID, AccessHash: me.AccessHash},
-	//          Params: &telegram.DataJson{Data: localParams},
-	//      })
-	//      remoteParams := /* extract phone.GroupCall.Params.Data from updates */
-	remoteParams, err := joinAndGetRemoteParams(tg, chatID, localParams)
+
+	// 3. Telegram MTProto join. The response contains the remote answer JSON.
+	remoteParams, err := joinAndGetRemoteParams(tg, inputCall, localParams)
 	if err != nil {
 		log.Fatalf("join + extract: %v", err)
 	}
-	// 3. Finish handshake.
-	if err = client.Connect(chatID, remoteParams); err != nil {
+
+	// 4. Finish WebRTC handshake. ICE/DTLS runs async after this returns.
+	if err = client.Connect(cfg.ChatID, remoteParams); err != nil {
 		log.Fatalf("client.Connect: %v", err)
 	}
-	// 4. Stream.
-	if err = client.SetStreamSources(chatID, gotgcall.FromFile(source, gotgcall.EncodeOptions{})); err != nil {
+
+	// 5. Stream the source. FromFile/FromURL handle local files, HTTP, HLS,
+	//    RTMP, RTSP — anything ffmpeg can decode.
+	src := buildSource(source)
+	if err = client.SetStreamSources(cfg.ChatID, src); err != nil {
 		log.Fatalf("set source: %v", err)
 	}
+
+	log.Println("streaming; press Ctrl+C to stop")
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
 	<-stop
-	// 5. Leave. phone.LeaveGroupCall takes a `Source` int that the server
-	//    uses to identify which participant is leaving. In practice 0 works
-	//    fine (Telegram infers from the joined session); if you want to be
-	//    explicit, pass client.AudioSSRC(chatID).
-	_ = client.Stop(chatID)
-	_ = leaveGroupCall(tg, chatID, 0)
+
+	// 6. Tear down. Telegram infers the leaving participant from the joined
+	//    MTProto session — Source = 0 works fine for self-leave.
+	_ = client.Stop(cfg.ChatID)
+	if err = leaveGroupCall(tg, inputCall); err != nil {
+		log.Printf("leave: %v", err)
+	}
 	log.Println("done")
+}
+
+// --- config helpers ----------------------------------------------------------
+
+type config struct {
+	AppHash string
+	Session string
+	ChatID  int64
+	AppID   int
+}
+
+func loadConfig() (config, error) {
+	var c config
+	c.AppID, _ = strconv.Atoi(os.Getenv("APP_ID"))
+	c.AppHash = os.Getenv("APP_HASH")
+	c.Session = envOr("SESSION", "session.dat")
+	chatRaw := os.Getenv("CHAT")
+	if c.AppID == 0 || c.AppHash == "" || chatRaw == "" {
+		return c, errors.New("APP_ID, APP_HASH, CHAT env vars are required")
+	}
+	id, err := strconv.ParseInt(chatRaw, 10, 64)
+	if err != nil {
+		return c, fmt.Errorf("CHAT must be an int64 chat id: %w", err)
+	}
+	c.ChatID = id
+	return c, nil
 }
 
 func envOr(k, def string) string {
@@ -130,13 +204,116 @@ func envOr(k, def string) string {
 	return def
 }
 
-// joinAndGetRemoteParams is a stub that the integrator should implement
-// against the gogram version they ship. The library is intentionally
-// MTProto-lib-agnostic; this glue lives in your bot code, not in gotgcall.
-func joinAndGetRemoteParams(_ *telegram.Client, _ int64, _ string) (string, error) {
-	return "", errors.New("TODO: implement against your gogram version; see comments above")
+// --- source helper -----------------------------------------------------------
+
+// buildSource picks the right gotgcall constructor based on the argument shape:
+//
+//   - "shell:<cmd>"            → FromShell (one custom ffmpeg leg, audio)
+//   - "shellv:<cmd>"           → FromShell (one custom ffmpeg leg, video)
+//   - "shells:<audio>|<video>" → FromShells (two custom legs; either side may be empty)
+//   - "http(s)://", "rtmp://", "rtsp://"
+//                              → FromURL (lib builds ffmpeg argv with HLS/HTTP
+//                                  flags — reconnect, timeout, user-agent)
+//   - anything else            → FromFile (lib builds ffmpeg argv with fast-probe flags)
+//
+// FromFile / FromURL are the convenience path: pass EncodeOptions, the library
+// constructs the ffmpeg command for you. FromShell / FromShells are the escape
+// hatch when you need an atempo filter, custom -map, hardware encoders, etc.
+func buildSource(arg string) gotgcall.Source {
+	opt := gotgcall.EncodeOptions{}
+	switch {
+	case strings.HasPrefix(arg, "shells:"):
+		// "shells:<audio>|<video>" — either side may be empty to skip that track.
+		rest := strings.TrimPrefix(arg, "shells:")
+		audio, video, _ := strings.Cut(rest, "|")
+		return gotgcall.FromShells(audio, video)
+	case strings.HasPrefix(arg, "shell:"):
+		// Audio-only custom ffmpeg pipeline. Auto-filled with libopus / ogg / pipe:1.
+		return gotgcall.FromShell(strings.TrimPrefix(arg, "shell:"), gotgcall.TrackAudio)
+	case strings.HasPrefix(arg, "shellv:"):
+		// Video-only custom ffmpeg pipeline. Auto-filled with libvpx / ivf / pipe:1.
+		return gotgcall.FromShell(strings.TrimPrefix(arg, "shellv:"), gotgcall.TrackVideo)
+	case strings.HasPrefix(arg, "http://"), strings.HasPrefix(arg, "https://"),
+		strings.HasPrefix(arg, "rtmp://"), strings.HasPrefix(arg, "rtsp://"):
+		return gotgcall.FromURL(arg, opt)
+	default:
+		return gotgcall.FromFile(arg, opt)
+	}
 }
 
-func leaveGroupCall(_ *telegram.Client, _ int64, _ uint32) error {
-	return errors.New("TODO: implement phone.LeaveGroupCall against your gogram version")
+// --- gogram glue -------------------------------------------------------------
+
+// resolveActiveCall fetches the chat's full info and returns the active group-
+// call reference. Works for both supergroups/channels and basic groups.
+func resolveActiveCall(tg *telegram.Client, chatID int64) (telegram.InputGroupCall, error) {
+	// Negative IDs prefixed with -100 are channels/supergroups; -1xxx is a
+	// migrated basic chat. gogram normalizes via ResolvePeer.
+	peer, err := tg.ResolvePeer(chatID)
+	if err != nil {
+		return nil, fmt.Errorf("resolve peer: %w", err)
+	}
+
+	switch p := peer.(type) {
+	case *telegram.InputPeerChannel:
+		full, err := tg.ChannelsGetFullChannel(&telegram.InputChannelObj{
+			ChannelID:  p.ChannelID,
+			AccessHash: p.AccessHash,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("channel full: %w", err)
+		}
+		cf, ok := full.FullChat.(*telegram.ChannelFull)
+		if !ok || cf.Call == nil {
+			return nil, errors.New("no active group call in this channel — start a voice chat first")
+		}
+		return cf.Call, nil
+	case *telegram.InputPeerChat:
+		full, err := tg.MessagesGetFullChat(p.ChatID)
+		if err != nil {
+			return nil, fmt.Errorf("chat full: %w", err)
+		}
+		cf, ok := full.FullChat.(*telegram.ChatFullObj)
+		if !ok || cf.Call == nil {
+			return nil, errors.New("no active group call in this chat — start a voice chat first")
+		}
+		return cf.Call, nil
+	default:
+		return nil, fmt.Errorf("unsupported peer type %T", peer)
+	}
+}
+
+// joinAndGetRemoteParams calls phone.JoinGroupCall and pulls the Telegram
+// answer JSON out of the resulting Updates. Telegram puts the response in an
+// UpdateGroupCallConnection update.
+func joinAndGetRemoteParams(tg *telegram.Client, call telegram.InputGroupCall, localParams string) (string, error) {
+	me, err := tg.GetMe()
+	if err != nil {
+		return "", fmt.Errorf("get me: %w", err)
+	}
+	updates, err := tg.PhoneJoinGroupCall(&telegram.PhoneJoinGroupCallParams{
+		Call: call,
+		JoinAs: &telegram.InputPeerUser{
+			UserID:     me.ID,
+			AccessHash: me.AccessHash,
+		},
+		Params: &telegram.DataJson{Data: localParams},
+	})
+	if err != nil {
+		return "", fmt.Errorf("phone.JoinGroupCall: %w", err)
+	}
+	// Look for UpdateGroupCallConnection inside the Updates envelope.
+	switch u := updates.(type) {
+	case *telegram.UpdatesObj:
+		for _, upd := range u.Updates {
+			if conn, ok := upd.(*telegram.UpdateGroupCallConnection); ok && conn.Params != nil {
+				return conn.Params.Data, nil
+			}
+		}
+	}
+	return "", errors.New("no UpdateGroupCallConnection in PhoneJoinGroupCall response")
+}
+
+func leaveGroupCall(tg *telegram.Client, call telegram.InputGroupCall) error {
+	_, err := tg.PhoneLeaveGroupCall(call, 0)
+	return err
 }

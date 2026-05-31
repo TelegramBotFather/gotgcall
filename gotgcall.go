@@ -17,15 +17,33 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"os"
 	"os/exec"
 	"sync"
 	"sync/atomic"
+	"time"
+
+	"github.com/pion/webrtc/v4"
 
 	"github.com/annihilatorrrr/gotgcall/instances"
 	"github.com/annihilatorrrr/gotgcall/media"
 	"github.com/annihilatorrrr/gotgcall/models"
 	"github.com/annihilatorrrr/gotgcall/utils"
 	"github.com/annihilatorrrr/gotgcall/wrtc"
+)
+
+// ICEServer is re-exported so callers can configure STUN/TURN without
+// importing pion directly.
+type ICEServer = webrtc.ICEServer
+
+// NetworkType is re-exported for WithNetworkTypes.
+type NetworkType = webrtc.NetworkType
+
+const (
+	NetworkTypeUDP4 = webrtc.NetworkTypeUDP4
+	NetworkTypeUDP6 = webrtc.NetworkTypeUDP6
+	NetworkTypeTCP4 = webrtc.NetworkTypeTCP4
+	NetworkTypeTCP6 = webrtc.NetworkTypeTCP6
 )
 
 // --- Re-exports for ergonomics -------------------------------------------------
@@ -89,11 +107,17 @@ var (
 type Option func(*config)
 
 type config struct {
-	logger       *slog.Logger
-	ffmpegPath   string
-	sharedUDPMux bool
-	certPoolSize int
-	dispatchBuf  int
+	logger          *slog.Logger
+	ffmpegPath      string
+	iceServers      []ICEServer
+	networkTypes    []NetworkType
+	certPoolSize    int
+	dispatchBuf     int
+	iceDisconnect   time.Duration
+	iceFailed       time.Duration
+	iceKeepalive    time.Duration
+	sharedUDPMux    bool
+	ffmpegStderrLog bool
 }
 
 func defaultConfig() config {
@@ -146,6 +170,84 @@ func WithDispatchBuffer(n int) Option {
 	}
 }
 
+// WithICEServers replaces the default Google STUN servers. Pass TURN entries
+// here for users behind symmetric NAT or restrictive firewalls. Pass an
+// empty slice to keep the defaults.
+//
+//	gotgcall.WithICEServers([]gotgcall.ICEServer{
+//	    {URLs: []string{"stun:stun.l.google.com:19302"}},
+//	    {URLs: []string{"turn:turn.example.com:3478"},
+//	     Username: "u", Credential: "p"},
+//	})
+func WithICEServers(servers []ICEServer) Option {
+	return func(c *config) {
+		if len(servers) > 0 {
+			c.iceServers = servers
+		}
+	}
+}
+
+// WithNetworkTypes overrides the ICE candidate network-type whitelist.
+// Default is UDP4 only (Telegram's edge mixers favor IPv4/UDP, and trimming
+// the checklist speeds up ICE). Enable IPv6 / TCP for restrictive
+// environments where UDP4 is blocked.
+//
+//	gotgcall.WithNetworkTypes(
+//	    gotgcall.NetworkTypeUDP4,
+//	    gotgcall.NetworkTypeUDP6,
+//	    gotgcall.NetworkTypeTCP4,
+//	)
+func WithNetworkTypes(types ...NetworkType) Option {
+	return func(c *config) {
+		if len(types) > 0 {
+			c.networkTypes = types
+		}
+	}
+}
+
+// WithICETimeouts overrides pion's ICE timing. Pass 0 for any value to keep
+// the library default (30s disconnect grace / 60s failed / 2s keepalive).
+// Use longer values on unstable networks where brief connectivity drops
+// shouldn't kill the call.
+func WithICETimeouts(disconnect, failed, keepalive time.Duration) Option {
+	return func(c *config) {
+		if disconnect > 0 {
+			c.iceDisconnect = disconnect
+		}
+		if failed > 0 {
+			c.iceFailed = failed
+		}
+		if keepalive > 0 {
+			c.iceKeepalive = keepalive
+		}
+	}
+}
+
+// WithDebugLogs is a convenience that installs a Debug-level text handler
+// writing to os.Stderr. Equivalent to:
+//
+//	WithLogger(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug})))
+//
+// Use this when reporting bugs — debug-level output covers ICE/DTLS state,
+// ffmpeg exit codes, streamer pacing, and pion-internal events bridged
+// through the new pion→slog adapter.
+func WithDebugLogs() Option {
+	return func(c *config) {
+		c.logger = slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
+			Level: slog.LevelDebug,
+		}))
+	}
+}
+
+// WithFFmpegStderrLog tees ffmpeg's stderr output to the library logger at
+// Debug level while the process is running. Without this, ffmpeg stderr is
+// only surfaced in the final error message (last 512 bytes) when the
+// subprocess crashes — useful for crash diagnosis but useless for "ffmpeg
+// is running but I see no audio" symptoms. Enable for verbose diagnosis.
+func WithFFmpegStderrLog() Option {
+	return func(c *config) { c.ffmpegStderrLog = true }
+}
+
 // --- Client --------------------------------------------------------------------
 
 // Client multiplexes many concurrent group calls behind a single
@@ -187,11 +289,17 @@ func New(opts ...Option) (*Client, error) {
 	}
 	media.SetFFmpegPath(cfg.ffmpegPath)
 	media.SetLogger(cfg.logger)
+	media.SetStderrLog(cfg.ffmpegStderrLog)
 
 	factory, err := wrtc.NewFactory(wrtc.FactoryOptions{
-		Logger:       cfg.logger,
-		SharedUDPMux: cfg.sharedUDPMux,
-		CertPoolSize: cfg.certPoolSize,
+		Logger:               cfg.logger,
+		SharedUDPMux:         cfg.sharedUDPMux,
+		CertPoolSize:         cfg.certPoolSize,
+		ICEServers:           cfg.iceServers,
+		NetworkTypes:         cfg.networkTypes,
+		ICEDisconnectTimeout: cfg.iceDisconnect,
+		ICEFailedTimeout:     cfg.iceFailed,
+		ICEKeepaliveInterval: cfg.iceKeepalive,
 	})
 	if err != nil {
 		return nil, err

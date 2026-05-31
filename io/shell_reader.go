@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	stdio "io"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -41,8 +42,10 @@ type ShellReader struct {
 
 // NewShellReader spawns program with args and starts the process. The
 // returned reader streams stdout. If the program cannot be started,
-// ErrFFmpegSpawn is returned wrapped.
-func NewShellReader(parent context.Context, program string, args []string, log *slog.Logger) (*ShellReader, error) {
+// ErrFFmpegSpawn is returned wrapped. When streamStderr is true, ffmpeg's
+// stderr is also tee'd line-by-line into the logger at Debug level — useful
+// for diagnosing "ffmpeg runs but I hear nothing" symptoms.
+func NewShellReader(parent context.Context, program string, args []string, log *slog.Logger, streamStderr bool) (*ShellReader, error) {
 	if log == nil {
 		log = slog.New(slog.DiscardHandler)
 	}
@@ -55,7 +58,13 @@ func NewShellReader(parent context.Context, program string, args []string, log *
 	}
 	cmd.Stdout = pw
 	stderrRing := utils.NewRingBuffer(4096)
-	cmd.Stderr = stderrRing
+	if streamStderr {
+		// Fan-out: ring buffer captures the tail for the exit error message,
+		// stderrLineWriter logs each line at Debug level while the process runs.
+		cmd.Stderr = stdio.MultiWriter(stderrRing, &stderrLineWriter{log: log, program: program})
+	} else {
+		cmd.Stderr = stderrRing
+	}
 	if err = cmd.Start(); err != nil {
 		cancel()
 		_ = pr.Close()
@@ -76,6 +85,46 @@ func NewShellReader(parent context.Context, program string, args []string, log *
 	}
 	go r.reap()
 	return r, nil
+}
+
+// stderrLineWriter buffers ffmpeg's stderr until it sees a newline, then
+// emits one Debug log per line. Cheaper than logging each Write call (which
+// might contain a partial line) and produces readable output.
+type stderrLineWriter struct {
+	log     *slog.Logger
+	program string
+	pending []byte
+}
+
+func (w *stderrLineWriter) Write(p []byte) (int, error) {
+	w.pending = append(w.pending, p...)
+	for {
+		idx := -1
+		for i, b := range w.pending {
+			if b == '\n' {
+				idx = i
+				break
+			}
+		}
+		if idx < 0 {
+			break
+		}
+		line := w.pending[:idx]
+		// Trim trailing \r for CRLF tolerance.
+		if n := len(line); n > 0 && line[n-1] == '\r' {
+			line = line[:n-1]
+		}
+		if len(line) > 0 {
+			w.log.Debug("ffmpeg", "program", w.program, "stderr", string(line))
+		}
+		w.pending = w.pending[idx+1:]
+	}
+	// Cap pending growth to guard against pathological no-newline output.
+	const maxPending = 8 * 1024
+	if len(w.pending) > maxPending {
+		w.pending = w.pending[len(w.pending)-maxPending:]
+	}
+	return len(p), nil
 }
 
 func (r *ShellReader) reap() {

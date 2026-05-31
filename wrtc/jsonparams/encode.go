@@ -64,9 +64,18 @@ func FromOfferSDP(offerSDP string, audioSSRC, videoSSRC uint32) (string, error) 
 		}
 	}
 
-	if videoSSRC != 0 && audioSSRC != 0 {
-		lp.SSRCGroups = []SSRCGroup{{Semantics: "FID", Sources: []uint32{audioSSRC, videoSSRC}}}
-	}
+	// Note on ssrc-groups: in Telegram's JOIN payload, "FID" semantics is for
+	// video primary+RTX pairs ONLY (and "SIM" for simulcast layers) — NOT for
+	// audio+video bundling. ntgcalls sends ssrc-groups as an empty array when
+	// there is one video SSRC with no RTX/simulcast (see ntgcalls/wrtc/src/
+	// interfaces/group_connection.cpp). Emitting FID:[audio, video] here was
+	// the previous behavior and caused Telegram's SFU to silently drop video
+	// (it treated our video packets as audio-RTX and discarded them — audio
+	// worked fine, video never reached participants while the elapsed timer
+	// still incremented). Leave ssrc-groups empty: Telegram's SFU infers the
+	// video SSRC from incoming RTP packets via the sdes-mid header extension
+	// (which pion stamps automatically per m-section).
+	lp.SSRCGroups = []SSRCGroup{}
 
 	out, err := json.Marshal(lp)
 	if err != nil {

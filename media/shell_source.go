@@ -215,7 +215,7 @@ func (s *shellSource) openWith(ctx context.Context, args []string) (*Streams, er
 	if bin == "" {
 		bin = ffmpegPath()
 	}
-	r, err := gtio.NewShellReader(ctx, bin, args, getLogger())
+	r, err := gtio.NewShellReader(ctx, bin, args, getLogger(), StderrLogEnabled())
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", models.ErrFFmpegSpawn, err)
 	}
@@ -308,7 +308,7 @@ func (s *multiShellSource) Open(ctx context.Context) (*Streams, error) {
 		if bin == "" {
 			bin = ffmpegPath()
 		}
-		r, err := gtio.NewShellReader(ctx, bin, s.audioArgs, getLogger())
+		r, err := gtio.NewShellReader(ctx, bin, s.audioArgs, getLogger(), StderrLogEnabled())
 		if err != nil {
 			_ = closeAll()
 			return nil, fmt.Errorf("%w: audio: %v", models.ErrFFmpegSpawn, err)
@@ -321,7 +321,7 @@ func (s *multiShellSource) Open(ctx context.Context) (*Streams, error) {
 		if bin == "" {
 			bin = ffmpegPath()
 		}
-		r, err := gtio.NewShellReader(ctx, bin, s.videoArgs, getLogger())
+		r, err := gtio.NewShellReader(ctx, bin, s.videoArgs, getLogger(), StderrLogEnabled())
 		if err != nil {
 			_ = closeAll()
 			return nil, fmt.Errorf("%w: video: %v", models.ErrFFmpegSpawn, err)

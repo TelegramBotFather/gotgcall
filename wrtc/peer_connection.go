@@ -14,6 +14,7 @@ import (
 // defaultSTUNServers gives pion at least one reflexive-address server so it
 // can gather srflx candidates behind NATs. Without these, only host
 // candidates are emitted and any non-LAN connection fails ICE.
+// Used only when the Factory has no caller-supplied ICEServers.
 var defaultSTUNServers = []webrtc.ICEServer{
 	{URLs: []string{"stun:stun.l.google.com:19302"}},
 	{URLs: []string{"stun:stun1.l.google.com:19302"}},
@@ -45,11 +46,15 @@ func NewPeerConnection(f *Factory, log *slog.Logger) (*PeerConnection, error) {
 		log = slog.New(slog.DiscardHandler)
 	}
 
+	iceServers := f.ICEServers()
+	if len(iceServers) == 0 {
+		iceServers = defaultSTUNServers
+	}
 	pc, err := f.NewPeerConnection(webrtc.Configuration{
 		BundlePolicy:  webrtc.BundlePolicyMaxBundle,
 		RTCPMuxPolicy: webrtc.RTCPMuxPolicyRequire,
 		SDPSemantics:  webrtc.SDPSemanticsUnifiedPlan,
-		ICEServers:    defaultSTUNServers,
+		ICEServers:    iceServers,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("create peer connection: %w", err)

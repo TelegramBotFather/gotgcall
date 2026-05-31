@@ -68,7 +68,7 @@ func (s *transcodeSource) open(ctx context.Context, input []string) (*Streams, e
 		return firstErr
 	}
 	start := func(args []string) (stdio.Reader, error) {
-		r, err := gtio.NewShellReader(ctx, ffmpegPath(), args, getLogger())
+		r, err := gtio.NewShellReader(ctx, ffmpegPath(), args, getLogger(), StderrLogEnabled())
 		if err != nil {
 			return nil, err
 		}

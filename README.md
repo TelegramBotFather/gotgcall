@@ -26,9 +26,37 @@ gotgcall.FromURL("https://stream.example.com/...")   // HTTP / HLS / RTMP
 gotgcall.FromShell("ffmpeg -i thing.mp3 ...", gotgcall.TrackAudio)
 ```
 
-Defaults to **audio only**. Pass `EncodeOptions{Tracks: gotgcall.TrackAudio | gotgcall.TrackVideo}` to also extract video.
+Anything ffmpeg can decode is fair game — mp3, m4a, flac, ogg, opus, wav, webm, mp4, mkv, mov, etc. Defaults to **audio only**, regardless of what the container actually holds. Opt in to video extraction with `EncodeOptions{Tracks: TrackAudio | TrackVideo}`:
 
-`FromShell` accepts a partial command — missing essentials (`-analyzeduration 0`, `-probesize 64k` before `-i`; `-c:a libopus`, `-f ogg`, opus pacing, `pipe:1` after) are filled in automatically. Raw-PCM output codecs are rejected up front; the frame readers can't parse them.
+```go
+// audio + video from a single source (uses two ffmpeg subprocesses):
+client.SetStreamSources(chatID, gotgcall.FromFile("movie.mp4", gotgcall.EncodeOptions{
+    Tracks: gotgcall.TrackAudio | gotgcall.TrackVideo,
+}))
+```
+
+If the input has no video stream, the video ffmpeg exits with `Output file does not contain any stream` and the call fails — don't request video tracks unless you know the source has them.
+
+### FromShell ffmpeg recipes
+
+`FromShell` accepts a partial command — any missing essentials (`-analyzeduration 0`, `-probesize 64k` before `-i`; `-c:a libopus`, `-application audio`, `-frame_duration 20`, `-page_duration 20000`, `-mapping_family 0`, `-ar 48000`, `-ac 2`, `-f ogg`, `pipe:1` after — or `-c:v libvpx -deadline realtime -f ivf pipe:1` for video) are filled in. Raw-PCM output codecs are rejected; the frame readers can't parse them.
+
+```go
+// audio: minimum command — everything else is auto-filled
+gotgcall.FromShell(`ffmpeg -i "song.mp3"`, gotgcall.TrackAudio)
+
+// audio: the full hand-written form (equivalent after auto-fill)
+gotgcall.FromShell(`ffmpeg -analyzeduration 0 -probesize 64k -i "song.mp3" `+
+    `-vn -c:a libopus -b:a 64k -application audio `+
+    `-frame_duration 20 -page_duration 20000 -mapping_family 0 `+
+    `-ar 48000 -ac 2 -f ogg pipe:1`, gotgcall.TrackAudio)
+
+// video-only ffmpeg leg (the audio leg is a separate Source / FromShell call)
+gotgcall.FromShell(`ffmpeg -i "movie.mp4" -an -c:v libvpx -deadline realtime `+
+    `-b:v 800k -vf scale=1280:720 -r 30 -f ivf pipe:1`, gotgcall.TrackVideo)
+```
+
+A single `FromShell` call produces a single output (audio OR video). For both tracks from one input use `FromFile`/`FromURL` with the `Tracks` opt — the library spawns the two ffmpeg legs for you.
 
 ## Quick start
 

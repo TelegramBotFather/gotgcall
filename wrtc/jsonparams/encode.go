@@ -64,18 +64,29 @@ func FromOfferSDP(offerSDP string, audioSSRC, videoSSRC uint32) (string, error) 
 		}
 	}
 
-	// Note on ssrc-groups: in Telegram's JOIN payload, "FID" semantics is for
-	// video primary+RTX pairs ONLY (and "SIM" for simulcast layers) — NOT for
-	// audio+video bundling. ntgcalls sends ssrc-groups as an empty array when
-	// there is one video SSRC with no RTX/simulcast (see ntgcalls/wrtc/src/
-	// interfaces/group_connection.cpp). Emitting FID:[audio, video] here was
-	// the previous behavior and caused Telegram's SFU to silently drop video
-	// (it treated our video packets as audio-RTX and discarded them — audio
-	// worked fine, video never reached participants while the elapsed timer
-	// still incremented). Leave ssrc-groups empty: Telegram's SFU infers the
-	// video SSRC from incoming RTP packets via the sdes-mid header extension
-	// (which pion stamps automatically per m-section).
-	lp.SSRCGroups = []SSRCGroup{}
+	// ssrc-groups for video: Telegram REQUIRES at least one "FID" group per
+	// video stream so the SFU learns the video SSRC out of the JOIN payload
+	// — the empty-array variant (v0.6.0) was wrong and caused video to never
+	// reach participants while audio + state callbacks worked normally.
+	//
+	// FID semantics is for video primary+RTX pairs ONLY (never cross-media
+	// FID:[audio, video] like pre-v0.6.0 emitted — that made Telegram treat
+	// our video packets as failed audio retransmissions). Both ntgcalls
+	// (wrtc/src/interfaces/group_connection.cpp:32-56) and gortc (transport/
+	// group_connection.go:148-168) reserve an RTX SSRC adjacent to the
+	// primary and announce it in FID even when they never actually emit RTX
+	// packets — the second SSRC is just a number Telegram expects in the
+	// manifest. We use videoSSRC+1 for the same purpose; pion uses videoSSRC
+	// for the actual VP8 wire packets and the RTX SSRC stays a declared but
+	// unused number.
+	if videoSSRC != 0 {
+		lp.SSRCGroups = []SSRCGroup{{
+			Semantics: "FID",
+			Sources:   []uint32{videoSSRC, videoSSRC + 1},
+		}}
+	} else {
+		lp.SSRCGroups = []SSRCGroup{}
+	}
 
 	out, err := json.Marshal(lp)
 	if err != nil {

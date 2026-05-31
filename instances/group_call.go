@@ -37,13 +37,14 @@ type GroupCall struct {
 	chatID    int64
 	resumeMs  uint64 // seek offset captured on Pause; injected via SeekableSource.OpenAt on Resume
 
-	mu       sync.RWMutex
-	netState atomic.Int32 // models.ConnState
-	closed   atomic.Bool
-	pausing  atomic.Bool // true while Pause is tearing down the streamer; suppresses OnStreamEnd
-	paused   bool
-	muted    bool
-	videoOff bool
+	mu        sync.RWMutex
+	netState  atomic.Int32 // models.ConnState
+	closed    atomic.Bool
+	pausing   atomic.Bool // true while Pause is tearing down the streamer; suppresses OnStreamEnd
+	switching atomic.Bool // true while SetSource is replacing the source; suppresses OnStreamEnd for the old streamer
+	paused    bool
+	muted     bool
+	videoOff  bool
 }
 
 // NewGroupCall constructs a fresh call. Caller threads pion factory + logger.
@@ -94,6 +95,12 @@ func (g *GroupCall) SetSource(ctx context.Context, src media.Source, opt ...medi
 	}
 	g.mu.Lock()
 	defer g.mu.Unlock()
+
+	// Suppress OnStreamEnd from the streamer we're about to cancel — the
+	// caller is replacing the source, not signalling EOF. Without this,
+	// playlist auto-advance reacts to a phantom end event and races the swap.
+	g.switching.Store(true)
+	defer g.switching.Store(false)
 
 	// Tear down any existing streamers + streams atomically.
 	g.stopStreamersLocked()
@@ -183,10 +190,11 @@ func (g *GroupCall) stopStreamersLocked() {
 func (g *GroupCall) handleEnd(t models.StreamType, d models.Device, err error) {
 	closed := g.closed.Load()
 	pausing := g.pausing.Load()
+	switching := g.switching.Load()
 	g.log.Debug("handleEnd",
 		slog.Any("type", t), slog.Any("device", d), slog.Any("err", err),
-		slog.Bool("closed", closed), slog.Bool("pausing", pausing))
-	if closed || pausing {
+		slog.Bool("closed", closed), slog.Bool("pausing", pausing), slog.Bool("switching", switching))
+	if closed || pausing || switching {
 		return
 	}
 	if g.disp != nil && g.ev.OnStreamEnd != nil {

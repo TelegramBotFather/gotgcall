@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"log/slog"
 	"sync"
-	"time"
 
 	"github.com/pion/webrtc/v4"
 
@@ -56,27 +55,10 @@ func NewPeerConnection(f *Factory, log *slog.Logger) (*PeerConnection, error) {
 		return nil, fmt.Errorf("create peer connection: %w", err)
 	}
 
-	// ICE-stuck watchdog: if ICE stays in Checking for more than 5 s, close
-	// the PeerConnection so the caller can retry. Without this, a flaky NAT
-	// hole-punch leaves us hanging silently.
-	var (
-		iceStuckTimer *time.Timer
-		iceTimerMu    sync.Mutex
-	)
+	// Pion's own ICE failure timeout (set in peer_factory) surfaces stuck
+	// checking via ICEConnectionStateFailed → OnConnectionStateChange.
 	pc.OnICEConnectionStateChange(func(state webrtc.ICEConnectionState) {
 		log.Debug("ICE state", slog.String("state", state.String()))
-		iceTimerMu.Lock()
-		defer iceTimerMu.Unlock()
-		if iceStuckTimer != nil {
-			iceStuckTimer.Stop()
-			iceStuckTimer = nil
-		}
-		if state == webrtc.ICEConnectionStateChecking {
-			iceStuckTimer = time.AfterFunc(5*time.Second, func() {
-				log.Warn("ICE stuck in checking for 5s, closing peer connection")
-				_ = pc.Close()
-			})
-		}
 	})
 
 	audio, err := NewAudioTrack("audio0", "gotgcall-stream")

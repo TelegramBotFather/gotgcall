@@ -92,24 +92,23 @@ func (r *RTMPCall) spawnLocked(ctx context.Context, seekMs uint64) error {
 		cancel()
 		return err
 	}
+	// Wire the lifecycle event directly into the ShellReader's existing reap
+	// goroutine via SetOnExit instead of spawning a separate watchEnd goroutine
+	// per call. Saves one goroutine per active RTMP call.
+	cmd.SetOnExit(func(exitErr error) {
+		if r.closed.Load() {
+			return
+		}
+		if r.disp != nil && r.ev.OnStreamEnd != nil {
+			r.disp.Submit(func() {
+				r.ev.OnStreamEnd(models.Audio, models.Microphone, exitErr)
+			})
+		}
+	})
 	r.cmd = cmd
 	r.cmdCancel = cancel
 	r.startedAt = time.Now().Add(-time.Duration(seekMs) * time.Millisecond)
-	go r.watchEnd(cmd)
 	return nil
-}
-
-func (r *RTMPCall) watchEnd(cmd *gtio.ShellReader) {
-	<-cmd.Done()
-	err := cmd.Err()
-	if r.closed.Load() {
-		return
-	}
-	if r.disp != nil && r.ev.OnStreamEnd != nil {
-		r.disp.Submit(func() {
-			r.ev.OnStreamEnd(models.Audio, models.Microphone, err)
-		})
-	}
 }
 
 func (r *RTMPCall) stopFFmpegLocked() {

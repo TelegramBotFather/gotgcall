@@ -29,11 +29,21 @@ func (f *audioLevelInterceptorFactory) NewInterceptor(string) (interceptor.Inter
 }
 
 type audioLevelStream struct {
+	// absSendBuf is the per-stream 3-byte buffer for abs-send-time.
+	// pion's SetExtension copies the slice into the header during marshal
+	// (synchronous with Write), so reusing the buffer across packets is
+	// safe — the bytes are out on the wire before our next iteration.
+	absSendBuf    []byte
 	audioLevelID  uint8
 	absSendTimeID uint8
 	hasAudioLevel bool
 	hasAbsSend    bool
 }
+
+// audioLevelConstBuf is the constant ssrc-audio-level payload: voice-activity
+// bit (0x80) | level in -dBov (0..127), fixed at -20 dBov. Shared across all
+// streams since it never mutates.
+var audioLevelConstBuf = []byte{0x80 | 20}
 
 type audioLevelInterceptor struct {
 	interceptor.NoOp
@@ -42,7 +52,7 @@ type audioLevelInterceptor struct {
 }
 
 func (a *audioLevelInterceptor) BindLocalStream(info *interceptor.StreamInfo, writer interceptor.RTPWriter) interceptor.RTPWriter {
-	s := &audioLevelStream{}
+	s := &audioLevelStream{absSendBuf: make([]byte, 3)}
 	for _, ext := range info.RTPHeaderExtensions {
 		switch ext.URI {
 		case audioLevelURI:
@@ -58,14 +68,18 @@ func (a *audioLevelInterceptor) BindLocalStream(info *interceptor.StreamInfo, wr
 	a.mu.Unlock()
 	return interceptor.RTPWriterFunc(func(header *rtp.Header, payload []byte, attrs interceptor.Attributes) (int, error) {
 		if s.hasAudioLevel {
-			// Voice-activity bit (0x80) | level in -dBov (0..127); fixed -20 dBov.
-			_ = header.SetExtension(s.audioLevelID, []byte{0x80 | 20})
+			_ = header.SetExtension(s.audioLevelID, audioLevelConstBuf)
 		}
 		if s.hasAbsSend {
 			// 24-bit fixed-point seconds since epoch * 2^18, big-endian.
+			// Write into the per-stream buffer (no per-packet alloc); pion's
+			// SetExtension copies it into the header during marshal.
 			now := time.Now()
 			abs := (uint64(now.Unix())<<18 | uint64(now.Nanosecond())*uint64(1<<18)/uint64(1e9)) & 0x00FFFFFF
-			_ = header.SetExtension(s.absSendTimeID, []byte{byte(abs >> 16), byte(abs >> 8), byte(abs)})
+			s.absSendBuf[0] = byte(abs >> 16)
+			s.absSendBuf[1] = byte(abs >> 8)
+			s.absSendBuf[2] = byte(abs)
+			_ = header.SetExtension(s.absSendTimeID, s.absSendBuf)
 		}
 		return writer.Write(header, payload, attrs)
 	})

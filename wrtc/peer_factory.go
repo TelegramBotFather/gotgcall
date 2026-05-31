@@ -107,20 +107,10 @@ func NewFactory(opts FactoryOptions) (*Factory, error) {
 	}
 	settings.SetICETimeouts(disconnect, failed, keepalive)
 	// Skip virtual / VPN interfaces — gathering candidates on them slows ICE
-	// and produces unreachable pairs.
-	settings.SetInterfaceFilter(func(name string) bool {
-		lower := strings.ToLower(name)
-		for _, skip := range []string{
-			"vethernet", "vmware", "virtualbox", "vbox", "hyper-v",
-			"loopback", "teredo", "isatap", "tap-",
-			"docker", "wsl", "tailscale", "zerotier", "openvpn",
-		} {
-			if strings.Contains(lower, skip) {
-				return false
-			}
-		}
-		return true
-	})
+	// and produces unreachable pairs. Captured by the closure once; each
+	// candidate-gather pass does N substring scans rather than re-walking
+	// a literal slice every time.
+	settings.SetInterfaceFilter(makeInterfaceFilter())
 
 	f := &Factory{
 		settings:   settings,
@@ -184,6 +174,28 @@ func NewFactory(opts FactoryOptions) (*Factory, error) {
 		webrtc.WithInterceptorRegistry(interceptors),
 	)
 	return f, nil
+}
+
+// skipInterfaceSubstrings is the package-level fixed list of name fragments
+// that mark a virtual / VPN / container interface. Pre-lowered, scanned in
+// order with strings.Contains. Avoids re-allocating the slice for every
+// interface check during ICE gathering.
+var skipInterfaceSubstrings = [...]string{
+	"vethernet", "vmware", "virtualbox", "vbox", "hyper-v",
+	"loopback", "teredo", "isatap", "tap-",
+	"docker", "wsl", "tailscale", "zerotier", "openvpn",
+}
+
+func makeInterfaceFilter() func(string) bool {
+	return func(name string) bool {
+		lower := strings.ToLower(name)
+		for _, skip := range skipInterfaceSubstrings {
+			if strings.Contains(lower, skip) {
+				return false
+			}
+		}
+		return true
+	}
 }
 
 func registerCodecs(m *webrtc.MediaEngine) error {

@@ -37,7 +37,18 @@ type ShellReader struct {
 	waitErr  atomic.Pointer[error]
 	doneCh   chan struct{}
 	log      *slog.Logger
+	onExit   func(error) // optional hook fired from reap after the process is fully reaped
 	waitOnce sync.Once
+}
+
+// SetOnExit registers a callback invoked once the subprocess exits and the
+// reap goroutine has captured its exit error. Used to eliminate the need
+// for a separate watch goroutine in consumers like RTMPCall — instead of
+// `go waitForExit(cmd)` you set OnExit and the existing reap goroutine
+// dispatches the lifecycle event. Must be set BEFORE the first reap exit
+// (i.e. immediately after NewShellReader returns).
+func (r *ShellReader) SetOnExit(fn func(error)) {
+	r.onExit = fn
 }
 
 // NewShellReader spawns program with args and starts the process. The
@@ -129,6 +140,25 @@ func (w *stderrLineWriter) Write(p []byte) (int, error) {
 
 func (r *ShellReader) reap() {
 	defer close(r.doneCh)
+	// Recover so a panic inside cmd.Wait / stderr.Snapshot doesn't leave
+	// r.doneCh unclosed — every blocked Close() caller would deadlock.
+	defer func() {
+		if v := recover(); v != nil {
+			r.log.Error("shell_reader: reap panic", slog.Any("recover", v))
+			panicErr := fmt.Errorf("%w: reap panic: %v", models.ErrInternal, v)
+			r.waitErr.Store(&panicErr)
+		}
+		// Fire OnExit hook (if registered) after the process is fully reaped,
+		// so RTMPCall and similar consumers can react without spawning an
+		// additional watchEnd goroutine.
+		if cb := r.onExit; cb != nil {
+			exitErr := error(nil)
+			if p := r.waitErr.Load(); p != nil {
+				exitErr = *p
+			}
+			cb(exitErr)
+		}
+	}()
 	err := r.cmd.Wait()
 	if err != nil {
 		if exitErr, ok := errors.AsType[*exec.ExitError](err); ok {

@@ -7,6 +7,7 @@ import (
 	"crypto/rand"
 	"log/slog"
 	"sync"
+	"time"
 
 	"github.com/pion/webrtc/v4"
 )
@@ -39,6 +40,10 @@ func NewCertPool(size int, log *slog.Logger) *CertPool {
 
 func (p *CertPool) refill() {
 	defer p.wg.Done()
+	// errBackoff prevents a tight spin if generateECDSACert fails persistently
+	// (entropy exhaustion, syscall pressure). Starts at 100 ms, caps at 5 s.
+	const minBackoff, maxBackoff = 100 * time.Millisecond, 5 * time.Second
+	backoff := minBackoff
 	for {
 		select {
 		case <-p.closed:
@@ -47,9 +52,21 @@ func (p *CertPool) refill() {
 		}
 		cert, err := generateECDSACert()
 		if err != nil {
-			p.log.Warn("certpool: generation failed", slog.Any("err", err))
+			p.log.Warn("certpool: generation failed", slog.Any("err", err), slog.Duration("backoff", backoff))
+			select {
+			case <-time.After(backoff):
+			case <-p.closed:
+				return
+			}
+			if backoff < maxBackoff {
+				backoff *= 2
+				if backoff > maxBackoff {
+					backoff = maxBackoff
+				}
+			}
 			continue
 		}
+		backoff = minBackoff // reset on success
 		select {
 		case p.ch <- cert:
 		case <-p.closed:

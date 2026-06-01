@@ -389,7 +389,7 @@ func tokenizeShell(s string) []string {
 	}
 	for i := 0; i < len(s); i++ {
 		c := s[i]
-		if inQuote && c == '\\' && i+1 < len(s) {
+		if c == '\\' && i+1 < len(s) {
 			next := s[i+1]
 			if next == '"' || next == '\\' {
 				cur.WriteByte(next)

@@ -10,10 +10,18 @@ import (
 	"os/exec"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/annihilatorrrr/gotgcall/models"
 	"github.com/annihilatorrrr/gotgcall/utils"
 )
+
+// readEOFDrainTimeout bounds the wait Read does on EOF for the reap goroutine
+// to capture the child's exit status. Picked to be long enough that a child
+// that just closed its stdout always has time to be reaped on a non-loaded
+// box (microseconds in practice), and short enough that a pathological reap
+// hang doesn't strand a Read forever.
+const readEOFDrainTimeout = 200 * time.Millisecond
 
 // ShellReader spawns a ffmpeg subprocess, exposes its stdout as a Reader,
 // captures the tail of stderr in a fixed-size ring, and cleans up when
@@ -179,9 +187,22 @@ func trimTail(b []byte) string {
 }
 
 // Read pulls bytes from the subprocess stdout.
+//
+// When the read returns an error (typically io.EOF because the child closed
+// its write end of the pipe by exiting), we briefly wait for the reap
+// goroutine to capture the child's exit status and stderr tail before
+// looking up waitErr. Without this wait there's a race: a child that fails
+// fast (bad input, missing codec) closes its write end before reap returns
+// from cmd.Wait + Store(&err), so callers get a bare io.EOF and the
+// downstream parser ("ogg parse: EOF") swallows the actual ffmpeg diagnostic.
+// The drain is bounded so a pathological reap hang can't strand Read forever.
 func (r *ShellReader) Read(p []byte) (int, error) {
 	n, err := r.stdout.Read(p)
 	if err != nil {
+		select {
+		case <-r.doneCh:
+		case <-time.After(readEOFDrainTimeout):
+		}
 		if wErrPtr := r.waitErr.Load(); wErrPtr != nil {
 			return n, *wErrPtr
 		}

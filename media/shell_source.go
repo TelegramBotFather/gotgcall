@@ -366,10 +366,16 @@ func injectSeek(args []string, offset time.Duration) []string {
 }
 
 // tokenizeShell splits a shell-like string into argv tokens. Supports
-// double-quoted segments with spaces. Single quotes and backslash escapes
-// are treated as literal characters (the ffmpeg command strings we expect
-// don't use them; keeping this simple avoids surprises). Whitespace
-// outside quotes separates tokens.
+// double-quoted segments with spaces and — inside double quotes only —
+// the escape sequences \" (literal ") and \\ (literal \). Any other
+// backslash sequence is emitted verbatim so existing callers that embed
+// literal backslashes in strings like a User-Agent (`Mozilla\5.0 ...`)
+// keep working unchanged. Single quotes are treated as literal characters.
+// Whitespace outside quotes separates tokens.
+//
+// The \" support lets callers pass filenames that themselves contain "
+// (e.g. Telegram audio with `(From "Foo")` in the title) without the
+// embedded quote toggling inQuote and slicing the path mid-string.
 func tokenizeShell(s string) []string {
 	var out []string
 	var cur strings.Builder
@@ -383,6 +389,14 @@ func tokenizeShell(s string) []string {
 	}
 	for i := 0; i < len(s); i++ {
 		c := s[i]
+		if inQuote && c == '\\' && i+1 < len(s) {
+			next := s[i+1]
+			if next == '"' || next == '\\' {
+				cur.WriteByte(next)
+				i++
+				continue
+			}
+		}
 		switch {
 		case c == '"':
 			inQuote = !inQuote

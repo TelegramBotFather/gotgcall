@@ -171,7 +171,7 @@ Both `FromFile` and `FromURL` return seekable sources. `Pause` records the elaps
 gotgcall.FromShell("ffmpeg -i thing.mp3", gotgcall.TrackAudio)
 ```
 
-`FromShell` parses the cmdline as a shell-like argv (handles double-quoted args) and spawns it **directly via `exec`**, NOT via `/bin/sh`. Shell metacharacters in filenames can't inject commands.
+`FromShell` parses the cmdline as a shell-like argv (handles double-quoted args, plus `\"` and `\\` escape sequences for filenames containing literal `"` or `\` — e.g. a Telegram audio titled `(From "Foo")` that would otherwise slice the path mid-string when the embedded quote toggled the quote state) and spawns it **directly via `exec`**, NOT via `/bin/sh`. Shell metacharacters in filenames can't inject commands.
 
 Missing essentials are filled in automatically:
 
@@ -435,7 +435,7 @@ All errors are sentinels — branch with `errors.Is`:
 | `ErrConnectionFailed` | Same — declared for branching; current ICE-failed manifests as `OnConnectionChange(Failed)`. |
 | `ErrInvalidParams` | Malformed remote JSON in `Connect` (missing ufrag/pwd/fingerprints), or `FromShell` with empty/invalid command. |
 | `ErrFFmpegSpawn` | `exec.Cmd.Start` failed (binary missing / permission denied / OS resource exhaustion). |
-| `ErrFFmpegCrashed` | ffmpeg exited non-zero; wrapped error carries `exit=<code>` and the last 512 bytes of stderr for diagnosis. |
+| `ErrFFmpegCrashed` | ffmpeg exited non-zero; wrapped error carries `exit=<code>` and the last 512 bytes of stderr for diagnosis. Surfaced both via `OnStreamEnd` and on the `ShellReader.Read` EOF path (the Reader briefly waits — bounded 200 ms — for the reap goroutine to capture the real exit before returning, so a fast-failing child no longer collapses to a bare `io.EOF` swallowed by the OGG/IVF parser). |
 | `ErrFile` | Source contained no playable audio or video stream (OGG / IVF parse failed). |
 | `ErrClosed` | Any method called after `Client.Close()`. |
 | `ErrNotConnected` | Declared for branching; not currently emitted. |

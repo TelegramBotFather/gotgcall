@@ -91,11 +91,12 @@ func (a *audioLevelInterceptor) UnbindLocalStream(info *interceptor.StreamInfo) 
 	a.mu.Unlock()
 }
 
-// markerClearInterceptorFactory clears RTP marker on outbound audio.
+// markerClearInterceptorFactory fixes RTP marker on outbound audio.
 // Pion's packetizer marks every single-payload Opus packet, but per
 // RFC 7587 the marker should only be set on the first packet after
-// silence; an always-set marker forces jitter-buffer resync at the SFU
-// and degrades audio quality.
+// silence. The first packet of each binding gets marker=true so the
+// SFU recognises the start of audio; all subsequent packets get
+// marker=false to avoid jitter-buffer resync on every frame.
 type markerClearInterceptorFactory struct{}
 
 func (f *markerClearInterceptorFactory) NewInterceptor(string) (interceptor.Interceptor, error) {
@@ -110,8 +111,14 @@ func (m *markerClearInterceptor) BindLocalStream(info *interceptor.StreamInfo, w
 	if !strings.HasPrefix(info.MimeType, "audio/") {
 		return writer
 	}
+	first := true
 	return interceptor.RTPWriterFunc(func(header *rtp.Header, payload []byte, attrs interceptor.Attributes) (int, error) {
-		header.Marker = false
+		if first {
+			header.Marker = true
+			first = false
+		} else {
+			header.Marker = false
+		}
 		return writer.Write(header, payload, attrs)
 	})
 }

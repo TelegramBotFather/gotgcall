@@ -385,7 +385,7 @@ client.OnStreamEnd(func(chat int64, t StreamType, d Device, err error) {
 })
 
 client.OnConnectionChange(func(chat int64, info NetworkInfo) {
-    // info.State: Connecting | Connected | Failed | Closed | Timeout
+    // info.State: Connecting | Connected | Disconnected | Failed | Closed | Timeout
 })
 
 client.OnMediaStateChange(func(chat int64, state MediaState) {
@@ -438,7 +438,7 @@ All errors are sentinels — branch with `errors.Is`:
 | `ErrFFmpegCrashed` | ffmpeg exited non-zero; wrapped error carries `exit=<code>` and the last 512 bytes of stderr for diagnosis. Surfaced both via `OnStreamEnd` and on the `ShellReader.Read` EOF path (the Reader briefly waits — bounded 200 ms — for the reap goroutine to capture the real exit before returning, so a fast-failing child no longer collapses to a bare `io.EOF` swallowed by the OGG/IVF parser). |
 | `ErrFile` | Source contained no playable audio or video stream (OGG / IVF parse failed). |
 | `ErrClosed` | Any method called after `Client.Close()`. |
-| `ErrNotConnected` | Declared for branching; not currently emitted. |
+| `ErrNotConnected` | `SetSource` timed out waiting for WebRTC to reach Connected (15 s). |
 | `ErrInternal` | Wrapping for pion API errors that shouldn't happen (e.g. `CreateOffer` failure). |
 | `ErrWrongMode` | WebRTC-only method called on an RTMP call (or vice versa). |
 
@@ -461,7 +461,7 @@ All errors are sentinels — branch with `errors.Is`:
 
 **TURN.** Not configured by default. Telegram's SFU exposes reflexive candidates in the JOIN response and our outbound NAT path is normally enough.
 
-**ICE timeouts.** Disconnect grace = 60 s, failed declaration = 120 s, keepalive = 2 s. Bumped 2× from gortc's 30/60/2 baseline in v0.6.4 — in practice Telegram's edge wobble on rejoin takes 60-90 s to settle on a working candidate pair, and the shorter window made pion declare Failed before the SFU finished steering. Override via `WithICETimeouts` for ultra-responsive UIs (shorter) or extra-unstable networks (longer). Pion surfaces failure via `OnConnectionStateChange(Failed)`.
+**ICE timeouts.** Disconnect grace = 60 s, failed declaration = 120 s, keepalive = 2 s. Bumped 2× from gortc's 30/60/2 baseline in v0.6.4 — in practice Telegram's edge wobble on rejoin takes 60-90 s to settle on a working candidate pair, and the shorter window made pion declare Failed before the SFU finished steering. Override via `WithICETimeouts` for ultra-responsive UIs (shorter) or extra-unstable networks (longer). Pion surfaces failure via `OnConnectionStateChange(Failed)`. On top of the pion timers the `FactoryMonitor` runs a **5 s checking-stuck kill**: if a PC stays in `Connecting`/`New` for more than 5 s the monitor force-closes it — Telegram's STUN servers respond in 1-3 s so anything past 5 s is unusable.
 
 **UDP mux.** Default behavior: each call binds its own UDP socket. Enable `WithSharedUDPMux()` to route every call through one shared `udp4:0` socket. Useful at 100+ concurrent calls where you don't want N ephemeral ports open.
 
@@ -495,7 +495,7 @@ All errors are sentinels — branch with `errors.Is`:
 - **Requesting video on an audio-only source fails the call.** The library opens two ffmpeg subprocesses for `Tracks: TrackVideo`. If the source has no video stream, ffmpeg's `-map 0:v?` makes the video leg exit cleanly (no stream), the OGG/IVF parser sees EOF, and the video track is silently skipped — but if audio also fails, you get `ErrFile`. Don't request video tracks unless you know the container has them.
 - **Don't switch ffmpeg output back to PCM.** It will "work" but defeats the design — you'd be re-encoding in Go (which would require cgo, the very thing this library exists to avoid).
 - **Raw PCM/YUV is rejected at construction time.** `FromShell` validates the codec/container args and returns `ErrInvalidParams` with a useful hint pointing at `libopus`/`libvpx`.
-- **`SetStreamSources` does not wait for ICE.** It starts ffmpeg immediately. ICE/DTLS run in the background. Watch `OnConnectionChange(Failed)` if you need to react to connection failure during streaming.
+- **`SetSource` gates on ICE Connected** (15 s timeout). ffmpeg is spawned and OGG/IVF headers are parsed outside the lock, but `WriteSample` only begins after ICE+DTLS completes — samples written before SRTP binding are silently dropped by pion. If ICE fails or the call is stopped during the wait, `SetSource` returns `ErrNotConnected` / `ErrConnectionFailed`.
 - **Pause in RTMP mode is destructive to the connection.** ffmpeg is killed; Telegram drops the RTMP ingest. Resume re-establishes from `elapsed_ms`. Listeners will see a brief silence.
 
 ## Performance vs ntgcalls

@@ -22,6 +22,12 @@ const (
 	keepaliveTickInterval = 2 * time.Second
 	livenessTimeout       = 60 * time.Second
 	monitorPollInterval   = time.Second
+	// iceCheckingTimeout is the maximum time ICE may remain in Checking
+	// before the monitor force-closes the PC. Telegram's STUN servers
+	// respond in 1-3 s; if still checking after 5 s the network path is
+	// unusable and waiting for pion's full ICEFailedTimeout (120 s) just
+	// stalls the UX.
+	iceCheckingTimeout = 5 * time.Second
 )
 
 // FactoryMonitor is a SINGLE long-running goroutine, shared across every
@@ -165,23 +171,37 @@ type pcMonitorEntry struct {
 	log            *slog.Logger
 	lastBytes      atomic.Uint64
 	lastProgressNs atomic.Int64
+	checkingNs     atomic.Int64 // monotonic UnixNano when Checking was first seen; 0 = not checking or already settled
 }
 
 func (e *pcMonitorEntry) tick(doKeepalive bool) {
-	if e.pc.ConnectionState() != webrtc.PeerConnectionStateConnected {
-		// Pion's own state machine handles non-Connected transitions
-		// (its 60 s disconnect / 120 s failed timers are already in
-		// play). Reset our progress baseline so a reconnection gets a
-		// fresh timeout window.
+	state := e.pc.ConnectionState()
+
+	// ICE checking-stuck detection: if the PC has been in a non-Connected
+	// state continuously for iceCheckingTimeout, the ICE negotiation is
+	// stuck. Force-close so the caller sees Failed and can reconnect.
+	if state == webrtc.PeerConnectionStateConnecting || state == webrtc.PeerConnectionStateNew {
+		now := time.Now().UnixNano()
+		if start := e.checkingNs.Load(); start == 0 {
+			e.checkingNs.Store(now)
+		} else if time.Duration(now-start) > iceCheckingTimeout {
+			e.log.Warn("ICE stuck in Checking, forcing PC close",
+				slog.Duration("timeout", iceCheckingTimeout))
+			e.checkingNs.Store(-1) // prevent re-firing
+			_ = e.pc.Close()
+			return
+		}
+	} else {
+		e.checkingNs.Store(0)
+	}
+
+	if state != webrtc.PeerConnectionStateConnected {
 		e.lastBytes.Store(0)
 		e.lastProgressNs.Store(0)
 		return
 	}
 	e.checkLiveness()
 	if doKeepalive && e.video != nil {
-		// GeneratePadding silently no-ops while the packetizer is nil
-		// (i.e. before pion's Bind has wired the sender), so firing on
-		// every keepalive tick is harmless even right after Connected.
 		if err := e.video.GeneratePadding(1); err != nil {
 			e.log.Debug("video keepalive padding", slog.Any("err", err))
 		}
@@ -195,7 +215,7 @@ func (e *pcMonitorEntry) checkLiveness() {
 	}
 	now := time.Now().UnixNano()
 	prev := e.lastBytes.Load()
-	if bytes > prev {
+	if bytes != prev {
 		e.lastBytes.Store(bytes)
 		e.lastProgressNs.Store(now)
 		return

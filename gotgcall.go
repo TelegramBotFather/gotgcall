@@ -71,11 +71,12 @@ const (
 	Microphone = models.Microphone
 	Camera     = models.Camera
 
-	Connecting = models.Connecting
-	Connected  = models.Connected
-	Failed     = models.Failed
-	Closed     = models.Closed
-	Timeout    = models.Timeout
+	Connecting   = models.Connecting
+	Connected    = models.Connected
+	Disconnected = models.Disconnected
+	Failed       = models.Failed
+	Closed       = models.Closed
+	Timeout      = models.Timeout
 )
 
 var (

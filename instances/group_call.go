@@ -36,17 +36,19 @@ type GroupCall struct {
 	streams   *media.Streams
 	audioStr  *media.Streamer
 	videoStr  *media.Streamer
+	connected chan struct{}
 	srcEncOpt media.EncodeOptions
 	chatID    int64
 	resumeMs  uint64 // seek offset captured on Pause; injected via SeekableSource.OpenAt on Resume
 
-	mu        sync.RWMutex
-	netState  atomic.Int32 // models.ConnState
-	closed    atomic.Bool
-	switching atomic.Bool // true while SetSource is replacing the source; suppresses OnStreamEnd for the old streamer
-	paused    bool
-	muted     bool
-	videoOff  bool
+	mu            sync.RWMutex
+	connectedOnce sync.Once
+	netState      atomic.Int32 // models.ConnState
+	closed        atomic.Bool
+	switching     atomic.Bool // true while SetSource is replacing the source; suppresses OnStreamEnd for the old streamer
+	paused        bool
+	muted         bool
+	videoOff      bool
 }
 
 // NewGroupCall constructs a fresh call. Caller threads pion factory + logger.
@@ -59,22 +61,27 @@ func NewGroupCall(chatID int64, factory *wrtc.Factory, disp *utils.Dispatcher, l
 		return nil, err
 	}
 	gc := &GroupCall{
-		chatID: chatID,
-		pc:     pc,
-		log:    log.With(slog.Int64("chat", chatID)),
-		disp:   disp,
-		ev:     ev,
+		chatID:    chatID,
+		pc:        pc,
+		log:       log.With(slog.Int64("chat", chatID)),
+		disp:      disp,
+		ev:        ev,
+		connected: make(chan struct{}),
 	}
 	gc.netState.Store(int32(models.Connecting))
 	pc.OnConnectionStateChange(func(s models.ConnState) {
 		gc.netState.Store(int32(s))
+		if s == models.Connected || s == models.Failed || s == models.Closed {
+			gc.connectedOnce.Do(func() { close(gc.connected) })
+		}
 		// When pion declares the PC Failed or Closed, the underlying transport
 		// is gone and any further WriteSample on the audio/video tracks is
 		// discarded internally. Tear the streamers down so we stop burning CPU
-		// + pipe-IO pumping samples into the void. Without this, a 3-minute
-		// song after an ICE Failed keeps ffmpeg + the streamer running for the
-		// full 3 minutes before EOF — observed as msSent climbing into the
-		// hundreds of thousands while the PC is already dead.
+		// + pipe-IO pumping samples into the void.
+		//
+		// Disconnected is a transient ICE state that pion can recover from
+		// (within the ICE disconnect/failed timeouts). Streamers keep running
+		// so audio resumes immediately when the connection recovers.
 		//
 		// Routed through the dispatcher so we don't take g.mu from pion's
 		// callback goroutine (which might race against SetSource holding it).
@@ -140,6 +147,29 @@ func (g *GroupCall) SetSource(ctx context.Context, src media.Source) error {
 	streams, audioStr, videoStr, err := g.prepareStreamers(ctx, src, srcEncOpt, muted, videoOff)
 	if err != nil {
 		return err
+	}
+
+	// Gate: wait for WebRTC to reach Connected before starting streamers.
+	// Samples written before ICE+DTLS completes are silently dropped by
+	// pion (no SRTP binding yet), causing silence on first play. The
+	// channel also closes on Failed/Closed so Stop() during the wait
+	// doesn't hang for the full timeout.
+	if models.ConnState(g.netState.Load()) != models.Connected {
+		connectTimer := time.NewTimer(15 * time.Second)
+		select {
+		case <-g.connected:
+			connectTimer.Stop()
+		case <-connectTimer.C:
+			_ = streams.Close()
+			return fmt.Errorf("%w: timed out waiting for WebRTC connection", models.ErrNotConnected)
+		case <-ctx.Done():
+			_ = streams.Close()
+			return ctx.Err()
+		}
+		if state := models.ConnState(g.netState.Load()); state != models.Connected {
+			_ = streams.Close()
+			return fmt.Errorf("%w: connection %s during setup", models.ErrConnectionFailed, state)
+		}
 	}
 
 	// Phase 2 (UNDER g.mu): tear down old streamers, install new ones,

@@ -11,6 +11,7 @@ type ConnState int
 const (
 	Connecting ConnState = iota
 	Connected
+	Disconnected
 	Failed
 	Closed
 	Timeout
@@ -22,6 +23,8 @@ func (s ConnState) String() string {
 		return "connecting"
 	case Connected:
 		return "connected"
+	case Disconnected:
+		return "disconnected"
 	case Failed:
 		return "failed"
 	case Closed:

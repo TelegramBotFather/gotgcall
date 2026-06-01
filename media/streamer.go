@@ -18,6 +18,13 @@ type Writer interface {
 	WriteSample(s media.Sample) error
 }
 
+// stallTimeout bounds how long a single src.Next() read can block before
+// the streamer force-closes the source. Catches ffmpeg processes stuck on
+// network I/O (e.g., HTTP source that dropped mid-stream) that would
+// otherwise hang the streamer indefinitely — OnStreamEnd never fires, the
+// bot never advances to the next song.
+const stallTimeout = 30 * time.Second
+
 // Streamer pulls Samples from a FrameReader at the sample's natural cadence
 // and pushes them to a Writer. Mute (audio) skips WriteSample but keeps
 // the clock advancing. Pause (set via SetPaused) blocks the pull loop on a
@@ -132,6 +139,10 @@ func (s *Streamer) run() {
 	defer t.Stop()
 
 	next := time.Now()
+	stallClose := func() {
+		s.log.Warn("streamer: source read stalled, force-closing")
+		_ = s.src.Close()
+	}
 	for {
 		if err := s.ctx.Err(); err != nil {
 			s.fireEnd(err)
@@ -148,7 +159,9 @@ func (s *Streamer) run() {
 		if gateWake := time.Now(); gateWake.After(next) {
 			next = gateWake
 		}
+		stall := time.AfterFunc(stallTimeout, stallClose)
 		sample, err := s.src.Next(s.ctx)
+		stall.Stop()
 		if err != nil {
 			s.log.Debug("streamer: src.Next err", slog.Any("err", err), slog.Uint64("msSent", s.msSent.Load()))
 			s.fireEnd(err)

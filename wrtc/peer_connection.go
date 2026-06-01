@@ -79,8 +79,6 @@ func NewPeerConnection(f *Factory, log *slog.Logger) (*PeerConnection, error) {
 		return nil, fmt.Errorf("create peer connection: %w", err)
 	}
 
-	// Pion's own ICE failure timeout (set in peer_factory) surfaces stuck
-	// checking via ICEConnectionStateFailed → OnConnectionStateChange.
 	pc.OnICEConnectionStateChange(func(state webrtc.ICEConnectionState) {
 		log.Debug("ICE state", slog.String("state", state.String()))
 	})
@@ -255,7 +253,9 @@ func translateState(s webrtc.PeerConnectionState) models.ConnState {
 		return models.Connecting
 	case webrtc.PeerConnectionStateConnected:
 		return models.Connected
-	case webrtc.PeerConnectionStateDisconnected, webrtc.PeerConnectionStateFailed:
+	case webrtc.PeerConnectionStateDisconnected:
+		return models.Disconnected
+	case webrtc.PeerConnectionStateFailed:
 		return models.Failed
 	case webrtc.PeerConnectionStateClosed:
 		return models.Closed

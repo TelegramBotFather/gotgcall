@@ -109,7 +109,12 @@ type filteringLogger struct {
 
 func noisy(msg string) bool {
 	return strings.Contains(msg, "Simulcast probing") ||
-		strings.Contains(msg, "Incoming unhandled RTP ssrc")
+		strings.Contains(msg, "Incoming unhandled RTP ssrc") ||
+		strings.Contains(msg, "stream is already closed") ||
+		strings.Contains(msg, "DTLS transport has not started yet") ||
+		strings.Contains(msg, "connecting canceled by caller") ||
+		strings.Contains(msg, "the agent is closed") ||
+		strings.Contains(msg, "without candidate pairs")
 }
 
 func (l *filteringLogger) Trace(msg string)                  { l.inner.Trace(msg) }

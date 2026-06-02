@@ -144,6 +144,7 @@ func NewFactory(opts FactoryOptions) (*Factory, error) {
 	settings.SetSrflxAcceptanceMinWait(0)
 	settings.SetPrflxAcceptanceMinWait(0)
 	settings.SetRelayAcceptanceMinWait(0)
+	settings.SetSTUNGatherTimeout(8 * time.Second)
 	// Skip virtual / VPN interfaces — gathering candidates on them slows ICE
 	// and produces unreachable pairs. Captured by the closure once; each
 	// candidate-gather pass does N substring scans rather than re-walking

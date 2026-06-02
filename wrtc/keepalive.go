@@ -23,11 +23,12 @@ const (
 	livenessTimeout       = 60 * time.Second
 	monitorPollInterval   = time.Second
 	// iceCheckingTimeout is the maximum time ICE may remain in Checking
-	// before the monitor force-closes the PC. Must exceed the SetSource
-	// connection gate (15s) so the caller's own timeout fires first with
-	// a clean ErrNotConnected; this is purely a safety net for PCs that
-	// never get a SetSource call or where the caller ignores the error.
-	iceCheckingTimeout = 30 * time.Second
+	// before the monitor force-closes the PC. Must exceed the default
+	// SetSource connection gate (30s) so the caller's own timeout fires
+	// first with a clean ErrNotConnected; this is purely a safety net
+	// for PCs that never get a SetSource call or where the caller
+	// ignores the error.
+	iceCheckingTimeout = 45 * time.Second
 	// newStateTimeout is the maximum time a PC may remain in New
 	// (Connect never called) before the monitor force-closes it.
 	newStateTimeout = 60 * time.Second
@@ -174,8 +175,9 @@ type pcMonitorEntry struct {
 	log            *slog.Logger
 	lastBytes      atomic.Uint64
 	lastProgressNs atomic.Int64
-	checkingNs     atomic.Int64 // monotonic UnixNano when Checking was first seen; 0 = not checking or already settled
-	newStartNs     atomic.Int64 // monotonic UnixNano when New was first seen; 0 = left New
+	checkingNs      atomic.Int64  // monotonic UnixNano when Checking was first seen; 0 = not checking or already settled
+	newStartNs      atomic.Int64  // monotonic UnixNano when New was first seen; 0 = left New
+	checkingLogTick atomic.Uint64 // ticks since entering Connecting; stats logged every 5
 }
 
 func (e *pcMonitorEntry) tick(doKeepalive bool) {
@@ -210,8 +212,12 @@ func (e *pcMonitorEntry) tick(doKeepalive bool) {
 			_ = e.pc.Close()
 			return
 		}
+		if tick := e.checkingLogTick.Add(1); tick%5 == 1 {
+			e.logCheckingStats()
+		}
 	} else {
 		e.checkingNs.Store(0)
+		e.checkingLogTick.Store(0)
 	}
 
 	if state != webrtc.PeerConnectionStateConnected {
@@ -249,6 +255,27 @@ func (e *pcMonitorEntry) checkLiveness() {
 			slog.Duration("age", age),
 			slog.Duration("timeout", livenessTimeout))
 		_ = e.pc.Close()
+	}
+}
+
+func (e *pcMonitorEntry) logCheckingStats() {
+	var pairs int
+	for _, s := range e.pc.GetStats() {
+		cp, ok := s.(webrtc.ICECandidatePairStats)
+		if !ok {
+			continue
+		}
+		pairs++
+		e.log.Debug("ICE pair",
+			slog.String("state", string(cp.State)),
+			slog.Bool("nominated", cp.Nominated),
+			slog.Uint64("pktSent", uint64(cp.PacketsSent)),
+			slog.Uint64("pktRecv", uint64(cp.PacketsReceived)),
+			slog.Uint64("reqSent", uint64(cp.RequestsSent)),
+			slog.Uint64("respRecv", uint64(cp.ResponsesReceived)))
+	}
+	if pairs == 0 {
+		e.log.Debug("ICE: no candidate pairs formed yet")
 	}
 }
 

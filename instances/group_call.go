@@ -185,7 +185,8 @@ func (g *GroupCall) SetSource(ctx context.Context, src media.Source) error {
 			state := models.ConnState(g.netState.Load())
 			g.log.Warn("connect gate timed out",
 				slog.String("state", state.String()),
-				slog.Duration("timeout", g.connectTimeout))
+				slog.Duration("timeout", g.connectTimeout),
+				slog.String("hint", "enable WithDebugLogs()+WithICECandidateLogs() to see candidate exchange details"))
 			return fmt.Errorf("%w: ICE/DTLS did not reach Connected within %s (stuck in %s)", models.ErrNotConnected, g.connectTimeout, state)
 		case <-ctx.Done():
 			connectTimer.Stop()

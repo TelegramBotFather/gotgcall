@@ -210,10 +210,25 @@ func (p *PeerConnection) Connect(remoteJSON string) error {
 	if local == nil {
 		return fmt.Errorf("%w: no local description; call LocalParams first", models.ErrInvalidParams)
 	}
+	if st := p.pc.SignalingState(); st != webrtc.SignalingStateHaveLocalOffer {
+		return fmt.Errorf("%w: signaling state %s, expected have-local-offer", models.ErrInvalidParams, st)
+	}
+	p.log.Debug("Connect: remote params",
+		slog.Int("candidates", len(rp.Transport.Candidates)),
+		slog.String("ufrag", rp.Transport.Ufrag))
+	for i, c := range rp.Transport.Candidates {
+		p.log.Debug("Connect: remote candidate",
+			slog.Int("i", i),
+			slog.String("ip", c.IP),
+			slog.String("port", c.Port),
+			slog.String("proto", c.Protocol),
+			slog.String("type", c.Type))
+	}
 	answer, err := jsonparams.SynthesizeAnswerSDP(local.SDP, rp)
 	if err != nil {
 		return fmt.Errorf("%w: synth answer: %v", models.ErrInvalidParams, err)
 	}
+	p.log.Debug("Connect: synthesized answer SDP", slog.String("sdp", answer))
 	return p.pc.SetRemoteDescription(webrtc.SessionDescription{
 		Type: webrtc.SDPTypeAnswer,
 		SDP:  answer,

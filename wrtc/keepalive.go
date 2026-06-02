@@ -24,10 +24,9 @@ const (
 	monitorPollInterval   = time.Second
 	// iceCheckingTimeout is the maximum time ICE may remain in Checking
 	// before the monitor force-closes the PC. Telegram's STUN servers
-	// respond in 1-3 s; if still checking after 5 s the network path is
-	// unusable and waiting for pion's full ICEFailedTimeout (120 s) just
-	// stalls the UX.
-	iceCheckingTimeout = 5 * time.Second
+	// typically respond in 1-3 s, but cross-DC rejoins and busy SFU
+	// edges can push ICE negotiation to 5-8 s under real traffic.
+	iceCheckingTimeout = 10 * time.Second
 )
 
 // FactoryMonitor is a SINGLE long-running goroutine, shared across every

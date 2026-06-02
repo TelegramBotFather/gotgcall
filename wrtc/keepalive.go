@@ -23,10 +23,11 @@ const (
 	livenessTimeout       = 60 * time.Second
 	monitorPollInterval   = time.Second
 	// iceCheckingTimeout is the maximum time ICE may remain in Checking
-	// before the monitor force-closes the PC. Telegram's STUN servers
-	// typically respond in 1-3 s, but cross-DC rejoins and busy SFU
-	// edges can push ICE negotiation to 5-8 s under real traffic.
-	iceCheckingTimeout = 10 * time.Second
+	// before the monitor force-closes the PC. Must exceed the SetSource
+	// connection gate (15s) so the caller's own timeout fires first with
+	// a clean ErrNotConnected; this is purely a safety net for PCs that
+	// never get a SetSource call or where the caller ignores the error.
+	iceCheckingTimeout = 30 * time.Second
 )
 
 // FactoryMonitor is a SINGLE long-running goroutine, shared across every

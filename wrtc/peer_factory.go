@@ -107,11 +107,12 @@ func NewFactory(opts FactoryOptions) (*Factory, error) {
 	// configuration — the single biggest "debug logs aren't working" complaint.
 	settings := webrtc.SettingEngine{LoggerFactory: newSlogPionFactory(log, opts.PionTraceAsDebug)}
 	settings.SetIncludeLoopbackCandidate(false)
-	// ICE-lite: we only gather host candidates and respond to connectivity
-	// checks from Telegram's full-ICE SFU. Matches ntgcalls' ICEMODE_LITE +
-	// ICEROLE_CONTROLLED. Eliminates STUN gathering delays — the #1 cause of
-	// "ICE stuck in Checking" in production.
-	settings.SetLite(true)
+	// Full ICE with no STUN servers: we gather only host candidates (fast,
+	// like ntgcalls) but still actively send connectivity checks to Telegram's
+	// SFU. pion's strict ICE-lite doesn't send checks at all (RFC 8445
+	// compliant), while libwebrtc's "lite" mode still checks — so we use full
+	// ICE to match ntgcalls' actual wire behavior.
+	settings.SetLite(false)
 	// UDP4+UDP6: ntgcalls enables both via PORTALLOCATOR_ENABLE_IPV6. Telegram's
 	// SFU accepts IPv6 candidates, and dual-stack hosts get more candidate pairs
 	// to work with. Caller can override via FactoryOptions.NetworkTypes.

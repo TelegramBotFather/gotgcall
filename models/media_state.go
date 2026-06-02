@@ -14,7 +14,6 @@ const (
 	Disconnected
 	Failed
 	Closed
-	Timeout
 )
 
 func (s ConnState) String() string {
@@ -29,8 +28,6 @@ func (s ConnState) String() string {
 		return "failed"
 	case Closed:
 		return "closed"
-	case Timeout:
-		return "timeout"
 	default:
 		return "unknown"
 	}

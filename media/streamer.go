@@ -139,29 +139,27 @@ func (s *Streamer) run() {
 	defer t.Stop()
 
 	next := time.Now()
-	stallClose := func() {
+	stallTimer := time.AfterFunc(time.Hour, func() {
 		s.log.Warn("streamer: source read stalled, force-closing")
 		_ = s.src.Close()
-	}
+	})
+	stallTimer.Stop()
+	defer stallTimer.Stop()
 	for {
 		if err := s.ctx.Err(); err != nil {
 			s.fireEnd(err)
 			return
 		}
-		// Gate before reading the next sample. While paused, ffmpeg's stdout
-		// pipe buffers ~64KB of frames; we resume reading via the resume chan.
 		if !s.gate() {
 			s.fireEnd(s.ctx.Err())
 			return
 		}
-		// Pacing baseline jumps over the paused duration so we don't burst
-		// every buffered frame on resume.
 		if gateWake := time.Now(); gateWake.After(next) {
 			next = gateWake
 		}
-		stall := time.AfterFunc(stallTimeout, stallClose)
+		stallTimer.Reset(stallTimeout)
 		sample, err := s.src.Next(s.ctx)
-		stall.Stop()
+		stallTimer.Stop()
 		if err != nil {
 			s.log.Debug("streamer: src.Next err", slog.Any("err", err), slog.Uint64("msSent", s.msSent.Load()))
 			s.fireEnd(err)

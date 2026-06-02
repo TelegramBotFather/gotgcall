@@ -28,6 +28,9 @@ const (
 	// a clean ErrNotConnected; this is purely a safety net for PCs that
 	// never get a SetSource call or where the caller ignores the error.
 	iceCheckingTimeout = 30 * time.Second
+	// newStateTimeout is the maximum time a PC may remain in New
+	// (Connect never called) before the monitor force-closes it.
+	newStateTimeout = 60 * time.Second
 )
 
 // FactoryMonitor is a SINGLE long-running goroutine, shared across every
@@ -172,15 +175,31 @@ type pcMonitorEntry struct {
 	lastBytes      atomic.Uint64
 	lastProgressNs atomic.Int64
 	checkingNs     atomic.Int64 // monotonic UnixNano when Checking was first seen; 0 = not checking or already settled
+	newStartNs     atomic.Int64 // monotonic UnixNano when New was first seen; 0 = left New
 }
 
 func (e *pcMonitorEntry) tick(doKeepalive bool) {
 	state := e.pc.ConnectionState()
 
+	if state == webrtc.PeerConnectionStateNew {
+		now := time.Now().UnixNano()
+		if start := e.newStartNs.Load(); start == 0 {
+			e.newStartNs.Store(now)
+		} else if time.Duration(now-start) > newStateTimeout {
+			e.log.Warn("PC stuck in New (Connect never called?), forcing close",
+				slog.Duration("timeout", newStateTimeout))
+			e.newStartNs.Store(-1)
+			_ = e.pc.Close()
+			return
+		}
+	} else {
+		e.newStartNs.Store(0)
+	}
+
 	// ICE checking-stuck detection: if the PC has been in a non-Connected
 	// state continuously for iceCheckingTimeout, the ICE negotiation is
 	// stuck. Force-close so the caller sees Failed and can reconnect.
-	if state == webrtc.PeerConnectionStateConnecting || state == webrtc.PeerConnectionStateNew {
+	if state == webrtc.PeerConnectionStateConnecting {
 		now := time.Now().UnixNano()
 		if start := e.checkingNs.Load(); start == 0 {
 			e.checkingNs.Store(now)

@@ -76,7 +76,6 @@ const (
 	Disconnected = models.Disconnected
 	Failed       = models.Failed
 	Closed       = models.Closed
-	Timeout      = models.Timeout
 )
 
 var (
@@ -91,8 +90,7 @@ var (
 var (
 	ErrConnectionExists   = models.ErrConnectionExists
 	ErrConnectionNotFound = models.ErrConnectionNotFound
-	ErrConnectionTimeout  = models.ErrConnectionTimeout
-	ErrConnectionFailed   = models.ErrConnectionFailed
+	ErrConnectionFailed = models.ErrConnectionFailed
 	ErrInvalidParams      = models.ErrInvalidParams
 	ErrFFmpegSpawn        = models.ErrFFmpegSpawn
 	ErrFFmpegCrashed      = models.ErrFFmpegCrashed
@@ -206,11 +204,11 @@ func WithNetworkTypes(types ...NetworkType) Option {
 }
 
 // WithICETimeouts overrides pion's ICE timing. Pass 0 for any value to keep
-// the library default (60s disconnect grace / 120s failed / 2s keepalive,
-// bumped 2× from gortc's 30/60/2 in v0.6.4 because Telegram's edge wobble
-// on rejoin often takes 60-90s to settle). Use longer values on unstable
-// networks where brief connectivity drops shouldn't kill the call; pass
-// shorter values for ultra-responsive UIs that need faster fail-detection.
+// the library default (60s disconnect grace / 120s failed / 2s keepalive).
+// Telegram's edge wobble on rejoin often takes 60-90s to settle, hence the
+// generous defaults. Use longer values on unstable networks where brief
+// connectivity drops shouldn't kill the call; pass shorter values for
+// ultra-responsive UIs that need faster fail-detection.
 func WithICETimeouts(disconnect, failed, keepalive time.Duration) Option {
 	return func(c *config) {
 		if disconnect > 0 {

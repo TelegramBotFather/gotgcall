@@ -2,7 +2,6 @@ package wrtc
 
 import (
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/pion/interceptor"
@@ -25,7 +24,7 @@ const (
 type audioLevelInterceptorFactory struct{}
 
 func (f *audioLevelInterceptorFactory) NewInterceptor(string) (interceptor.Interceptor, error) {
-	return &audioLevelInterceptor{streams: make(map[uint32]*audioLevelStream)}, nil
+	return &audioLevelInterceptor{}, nil
 }
 
 type audioLevelStream struct {
@@ -47,8 +46,6 @@ var audioLevelConstBuf = []byte{0x80 | 20}
 
 type audioLevelInterceptor struct {
 	interceptor.NoOp
-	streams map[uint32]*audioLevelStream
-	mu      sync.RWMutex
 }
 
 func (a *audioLevelInterceptor) BindLocalStream(info *interceptor.StreamInfo, writer interceptor.RTPWriter) interceptor.RTPWriter {
@@ -63,9 +60,6 @@ func (a *audioLevelInterceptor) BindLocalStream(info *interceptor.StreamInfo, wr
 			s.hasAbsSend = true
 		}
 	}
-	a.mu.Lock()
-	a.streams[info.SSRC] = s
-	a.mu.Unlock()
 	return interceptor.RTPWriterFunc(func(header *rtp.Header, payload []byte, attrs interceptor.Attributes) (int, error) {
 		if s.hasAudioLevel {
 			_ = header.SetExtension(s.audioLevelID, audioLevelConstBuf)
@@ -85,11 +79,6 @@ func (a *audioLevelInterceptor) BindLocalStream(info *interceptor.StreamInfo, wr
 	})
 }
 
-func (a *audioLevelInterceptor) UnbindLocalStream(info *interceptor.StreamInfo) {
-	a.mu.Lock()
-	delete(a.streams, info.SSRC)
-	a.mu.Unlock()
-}
 
 // markerClearInterceptorFactory fixes RTP marker on outbound audio.
 // Pion's packetizer marks every single-payload Opus packet, but per

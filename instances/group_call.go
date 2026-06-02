@@ -46,6 +46,7 @@ type GroupCall struct {
 	netState      atomic.Int32 // models.ConnState
 	closed        atomic.Bool
 	switching     atomic.Bool // true while SetSource is replacing the source; suppresses OnStreamEnd for the old streamer
+	connectCalled atomic.Bool
 	paused        bool
 	muted         bool
 	videoOff      bool
@@ -69,24 +70,33 @@ func NewGroupCall(chatID int64, factory *wrtc.Factory, disp *utils.Dispatcher, l
 		connected: make(chan struct{}),
 	}
 	gc.netState.Store(int32(models.Connecting))
+	var wasConnected atomic.Bool
 	pc.OnConnectionStateChange(func(s models.ConnState) {
 		gc.netState.Store(int32(s))
 		if s == models.Connected || s == models.Failed || s == models.Closed {
 			gc.connectedOnce.Do(func() { close(gc.connected) })
 		}
-		// When pion declares the PC Failed or Closed, the underlying transport
-		// is gone and any further WriteSample on the audio/video tracks is
-		// discarded internally. Tear the streamers down so we stop burning CPU
-		// + pipe-IO pumping samples into the void.
-		//
-		// Disconnected is a transient ICE state that pion can recover from
-		// (within the ICE disconnect/failed timeouts). Streamers keep running
-		// so audio resumes immediately when the connection recovers.
-		//
-		// Routed through the dispatcher so we don't take g.mu from pion's
-		// callback goroutine (which might race against SetSource holding it).
-		// onStreamEnd fires naturally from the streamer's run() defer as it
-		// exits, so the user's OnStreamEnd handler still triggers.
+		if s == models.Connected {
+			wasConnected.Store(true)
+		}
+
+		// Disconnected is a transient ICE state pion can recover from.
+		// Streamers keep running so audio resumes when the connection
+		// recovers. Suppress the user callback (ntgcalls does the same —
+		// it silently logs "Reconnecting" and returns without notifying).
+		if s == models.Disconnected {
+			gc.log.Debug("ICE disconnected, waiting for recovery")
+			return
+		}
+		// Connecting after already-connected is a transient reconnection
+		// attempt. Suppress the user callback to avoid false-alarm churn.
+		if s == models.Connecting && wasConnected.Load() {
+			gc.log.Debug("ICE reconnecting")
+			return
+		}
+
+		// When pion declares the PC Failed or Closed, the underlying
+		// transport is gone. Tear streamers down so we stop burning CPU.
 		if (s == models.Failed || s == models.Closed) && gc.disp != nil {
 			gc.disp.Submit(func() {
 				gc.mu.Lock()
@@ -116,6 +126,8 @@ func (g *GroupCall) Connect(remoteJSON string) error {
 	if g.closed.Load() {
 		return models.ErrClosed
 	}
+	g.connectCalled.Store(true)
+	g.log.Info("Connect: setting remote description")
 	return g.pc.Connect(remoteJSON)
 }
 
@@ -161,7 +173,10 @@ func (g *GroupCall) SetSource(ctx context.Context, src media.Source) error {
 			connectTimer.Stop()
 		case <-connectTimer.C:
 			_ = streams.Close()
-			return fmt.Errorf("%w: timed out waiting for WebRTC connection", models.ErrNotConnected)
+			if !g.connectCalled.Load() {
+				return fmt.Errorf("%w: timed out waiting for WebRTC — Connect() was never called", models.ErrNotConnected)
+			}
+			return fmt.Errorf("%w: ICE/DTLS did not reach Connected within 15s", models.ErrNotConnected)
 		case <-ctx.Done():
 			_ = streams.Close()
 			return ctx.Err()

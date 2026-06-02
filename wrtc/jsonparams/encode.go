@@ -72,14 +72,12 @@ func FromOfferSDP(offerSDP string, audioSSRC, videoSSRC uint32) (string, error) 
 	//
 	// FID semantics is for video primary+RTX pairs ONLY (never cross-media
 	// FID:[audio, video] like pre-v0.6.0 emitted — that made Telegram treat
-	// our video packets as failed audio retransmissions). Both ntgcalls
-	// (wrtc/src/interfaces/group_connection.cpp:32-56) and gortc (transport/
-	// group_connection.go:148-168) reserve an RTX SSRC adjacent to the
-	// primary and announce it in FID even when they never actually emit RTX
-	// packets — the second SSRC is just a number Telegram expects in the
-	// manifest. We use videoSSRC+1 for the same purpose; pion uses videoSSRC
-	// for the actual VP8 wire packets and the RTX SSRC stays a declared but
-	// unused number.
+	// our video packets as failed audio retransmissions). ntgcalls reserves
+	// an RTX SSRC adjacent to the primary and announces it in FID even when
+	// it never actually emits RTX packets — the second SSRC is just a number
+	// Telegram expects in the manifest. We use videoSSRC+1 for the same
+	// purpose; pion uses videoSSRC for the actual VP8 wire packets and the
+	// RTX SSRC stays a declared but unused number.
 	if videoSSRC != 0 {
 		lp.SSRCGroups = []SSRCGroup{{
 			Semantics: "FID",

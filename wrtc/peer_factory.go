@@ -46,8 +46,7 @@ func (f *Factory) Monitor() *FactoryMonitor {
 // defaultSTUNServers provides server-reflexive candidates for users behind
 // NAT. Host-only candidates work when the bot is on a public IP or the NAT
 // is permissive, but symmetric NAT / cloud VPC setups need srflx to reach
-// Telegram's SFU. gortc ships 7 servers; we use a smaller set to keep
-// gathering fast while still getting a reflexive candidate.
+// Telegram's SFU.
 var defaultSTUNServers = []webrtc.ICEServer{
 	{URLs: []string{"stun:stun.l.google.com:19302"}},
 	{URLs: []string{"stun:stun1.l.google.com:19302"}},
@@ -267,8 +266,7 @@ func makeInterfaceFilter() func(string) bool {
 }
 
 // makeIPFilter excludes IPs from subnets that produce unreachable ICE
-// candidates. Windows ICS (192.168.137.0/24) is the primary one — gortc
-// also filters this.
+// candidates. Windows ICS (192.168.137.0/24) is the primary one.
 func makeIPFilter() func(ip net.IP) bool {
 	icsNet := net.IPNet{IP: net.IP{192, 168, 137, 0}, Mask: net.CIDRMask(24, 32)}
 	return func(ip net.IP) bool {
@@ -279,7 +277,7 @@ func makeIPFilter() func(ip net.IP) bool {
 func registerCodecs(m *webrtc.MediaEngine) error {
 	// Audio: Opus PT 111 (Telegram standard). The fmtp line declares stereo
 	// and a high max bitrate so Telegram's SFU allocates bandwidth for music
-	// rather than speech — matching gortc's parameters.
+	// rather than speech.
 	if err := m.RegisterCodec(webrtc.RTPCodecParameters{
 		RTPCodecCapability: webrtc.RTPCodecCapability{
 			MimeType:     webrtc.MimeTypeOpus,

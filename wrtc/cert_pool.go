@@ -85,13 +85,6 @@ func (p *CertPool) Take(ctx context.Context) (*webrtc.Certificate, error) {
 			if c != nil {
 				return c, nil
 			}
-		default:
-		}
-		select {
-		case c := <-p.ch:
-			if c != nil {
-				return c, nil
-			}
 		case <-ctx.Done():
 			return nil, ctx.Err()
 		default:

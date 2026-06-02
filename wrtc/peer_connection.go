@@ -56,10 +56,11 @@ func NewPeerConnection(f *Factory, log *slog.Logger) (*PeerConnection, error) {
 	}
 
 	pc, err := f.NewPeerConnection(webrtc.Configuration{
-		BundlePolicy:  webrtc.BundlePolicyMaxBundle,
-		RTCPMuxPolicy: webrtc.RTCPMuxPolicyRequire,
-		SDPSemantics:  webrtc.SDPSemanticsUnifiedPlan,
-		ICEServers:    f.ICEServers(),
+		BundlePolicy:         webrtc.BundlePolicyMaxBundle,
+		RTCPMuxPolicy:        webrtc.RTCPMuxPolicyRequire,
+		SDPSemantics:         webrtc.SDPSemanticsUnifiedPlan,
+		ICEServers:           f.ICEServers(),
+		ICECandidatePoolSize: 2,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("create peer connection: %w", err)

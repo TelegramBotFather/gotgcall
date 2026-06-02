@@ -127,7 +127,7 @@ func (g *GroupCall) Connect(remoteJSON string) error {
 		return models.ErrClosed
 	}
 	g.connectCalled.Store(true)
-	g.log.Info("Connect: setting remote description")
+	g.log.Debug("Connect: setting remote description")
 	return g.pc.Connect(remoteJSON)
 }
 

@@ -130,7 +130,7 @@ func (l *filteringLogger) Warn(msg string) {
 	l.inner.Warn(msg)
 }
 func (l *filteringLogger) Warnf(format string, args ...any) {
-	if noisy(format) {
+	if noisy(format) || noisy(sprintfLazy(format, args)) {
 		return
 	}
 	l.inner.Warnf(format, args...)
@@ -142,7 +142,7 @@ func (l *filteringLogger) Error(msg string) {
 	l.inner.Error(msg)
 }
 func (l *filteringLogger) Errorf(format string, args ...any) {
-	if noisy(format) {
+	if noisy(format) || noisy(sprintfLazy(format, args)) {
 		return
 	}
 	l.inner.Errorf(format, args...)

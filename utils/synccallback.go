@@ -55,6 +55,11 @@ func (d *Dispatcher) Submit(fn func()) {
 	if fn == nil {
 		return
 	}
+	defer func() {
+		if r := recover(); r != nil {
+			// d.ch closed between our check and the send — normal during shutdown.
+		}
+	}()
 	select {
 	case <-d.closed:
 		return
@@ -63,7 +68,6 @@ func (d *Dispatcher) Submit(fn func()) {
 	select {
 	case d.ch <- fn:
 	default:
-		// Queue full. Drop oldest, retry once.
 		select {
 		case <-d.ch:
 			d.log.Warn("dispatcher: queue full, dropped oldest event")

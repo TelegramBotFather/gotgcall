@@ -60,7 +60,7 @@ func NewPeerConnection(f *Factory, log *slog.Logger) (*PeerConnection, error) {
 		RTCPMuxPolicy:        webrtc.RTCPMuxPolicyRequire,
 		SDPSemantics:         webrtc.SDPSemanticsUnifiedPlan,
 		ICEServers:           f.ICEServers(),
-		ICECandidatePoolSize: 2,
+		ICECandidatePoolSize: 0,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("create peer connection: %w", err)

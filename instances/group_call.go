@@ -178,6 +178,7 @@ func (g *GroupCall) SetSource(ctx context.Context, src media.Source) error {
 			}
 			return fmt.Errorf("%w: ICE/DTLS did not reach Connected within 15s", models.ErrNotConnected)
 		case <-ctx.Done():
+			connectTimer.Stop()
 			_ = streams.Close()
 			return ctx.Err()
 		}

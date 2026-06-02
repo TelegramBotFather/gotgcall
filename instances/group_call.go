@@ -363,11 +363,11 @@ func (g *GroupCall) handleStreamerEnd(t models.StreamType, d models.Device, err 
 		return
 	}
 	g.disp.Submit(func() {
+		if g.closed.Load() || g.switching.Load() {
+			return
+		}
 		g.mu.Lock()
 		prev := g.currentStateLocked()
-		// Nil out the field only if the ended streamer is still the
-		// current one. A concurrent SetSource may have replaced it
-		// already; nil-ing then would clobber a fresh streamer.
 		switch t {
 		case models.Audio:
 			if g.audioStr == str {
@@ -539,7 +539,7 @@ func (g *GroupCall) ElapsedMs() uint64 {
 func (g *GroupCall) State() models.MediaState {
 	g.mu.RLock()
 	defer g.mu.RUnlock()
-	return models.MediaState{Muted: g.muted, Paused: g.paused, VideoStopped: g.videoOff}
+	return models.MediaState{Muted: g.muted, Paused: g.paused, VideoStopped: g.videoStr == nil}
 }
 
 func (g *GroupCall) NetState() models.ConnState {

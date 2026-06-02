@@ -84,7 +84,7 @@ func (r *RTMPCall) spawnLocked(ctx context.Context, seekMs uint64) error {
 	if r.srcPath == nil {
 		return nil
 	}
-	opt := r.srcPath.EncodeOpts()
+	opt := r.srcPath.EncodeOpts().WithDefaults()
 	args := buildRTMPArgs(r.srcPath, seekMs, opt, r.rtmpURL)
 	ctx, cancel := context.WithCancel(ctx)
 	cmd, err := gtio.NewShellReader(ctx, "ffmpeg", args, r.log, media.StderrLogEnabled())

@@ -63,6 +63,8 @@ type EncodeOptions struct {
 	Tracks Track
 }
 
+func (o EncodeOptions) WithDefaults() EncodeOptions { return o.withDefaults() }
+
 func (o EncodeOptions) withDefaults() EncodeOptions {
 	if o.VideoBitrateKbps == 0 {
 		o.VideoBitrateKbps = 800

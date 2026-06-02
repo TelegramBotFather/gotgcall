@@ -90,7 +90,7 @@ var (
 var (
 	ErrConnectionExists   = models.ErrConnectionExists
 	ErrConnectionNotFound = models.ErrConnectionNotFound
-	ErrConnectionFailed = models.ErrConnectionFailed
+	ErrConnectionFailed   = models.ErrConnectionFailed
 	ErrInvalidParams      = models.ErrInvalidParams
 	ErrFFmpegSpawn        = models.ErrFFmpegSpawn
 	ErrFFmpegCrashed      = models.ErrFFmpegCrashed
@@ -112,6 +112,7 @@ type config struct {
 	networkTypes     []NetworkType
 	certPoolSize     int
 	dispatchBuf      int
+	connectTimeout   time.Duration
 	iceDisconnect    time.Duration
 	iceFailed        time.Duration
 	iceKeepalive     time.Duration
@@ -171,9 +172,9 @@ func WithDispatchBuffer(n int) Option {
 	}
 }
 
-// WithICEServers overrides the default ICE server list (2 Google STUN servers).
-// Pass TURN entries for users behind symmetric NAT or restrictive firewalls.
-// Pass an empty slice to disable STUN entirely (host-only candidates).
+// WithICEServers overrides the ICE server list (default: none, host candidates
+// only — matching ntgcalls). Pass STUN/TURN entries for bots behind symmetric
+// NAT or restrictive firewalls.
 //
 //	gotgcall.WithICEServers([]gotgcall.ICEServer{
 //	    {URLs: []string{"turn:turn.example.com:3478"},
@@ -219,6 +220,19 @@ func WithICETimeouts(disconnect, failed, keepalive time.Duration) Option {
 		}
 		if keepalive > 0 {
 			c.iceKeepalive = keepalive
+		}
+	}
+}
+
+// WithConnectTimeout overrides how long SetSource/Resume wait for the WebRTC
+// connection to reach Connected before giving up. Default 30s. Telegram's SFU
+// sometimes needs 15-25s to complete ICE+DTLS on busy edges or cross-DC
+// rejoins; the previous 15s hard-limit caused spurious failures. Set higher
+// on unstable networks; set lower for responsive UIs that prefer fast failure.
+func WithConnectTimeout(d time.Duration) Option {
+	return func(c *config) {
+		if d > 0 {
+			c.connectTimeout = d
 		}
 	}
 }
@@ -373,7 +387,7 @@ func (c *Client) CreateCall(chatID int64) (string, error) {
 	if _, exists := c.calls.Load(chatID); exists {
 		return "", ErrConnectionExists
 	}
-	gc, err := instances.NewGroupCall(chatID, c.factory, c.disp, c.cfg.logger, c.eventsFor(chatID))
+	gc, err := instances.NewGroupCall(chatID, c.factory, c.disp, c.cfg.logger, c.cfg.connectTimeout, c.eventsFor(chatID))
 	if err != nil {
 		return "", err
 	}

@@ -29,17 +29,18 @@ type GroupCallEvents struct {
 type GroupCall struct {
 	ev GroupCallEvents
 
-	src       media.Source
-	pc        *wrtc.PeerConnection
-	log       *slog.Logger
-	disp      *utils.Dispatcher
-	streams   *media.Streams
-	audioStr  *media.Streamer
-	videoStr  *media.Streamer
-	connected chan struct{}
-	srcEncOpt media.EncodeOptions
-	chatID    int64
-	resumeMs  uint64 // seek offset captured on Pause; injected via SeekableSource.OpenAt on Resume
+	src            media.Source
+	pc             *wrtc.PeerConnection
+	log            *slog.Logger
+	disp           *utils.Dispatcher
+	streams        *media.Streams
+	audioStr       *media.Streamer
+	videoStr       *media.Streamer
+	connected      chan struct{}
+	srcEncOpt      media.EncodeOptions
+	chatID         int64
+	connectTimeout time.Duration
+	resumeMs       uint64 // seek offset captured on Pause; injected via SeekableSource.OpenAt on Resume
 
 	mu            sync.RWMutex
 	connectedOnce sync.Once
@@ -53,21 +54,26 @@ type GroupCall struct {
 }
 
 // NewGroupCall constructs a fresh call. Caller threads pion factory + logger.
-func NewGroupCall(chatID int64, factory *wrtc.Factory, disp *utils.Dispatcher, log *slog.Logger, ev GroupCallEvents) (*GroupCall, error) {
+// connectTimeout controls how long SetSource waits for ICE+DTLS; 0 = 30s.
+func NewGroupCall(chatID int64, factory *wrtc.Factory, disp *utils.Dispatcher, log *slog.Logger, connectTimeout time.Duration, ev GroupCallEvents) (*GroupCall, error) {
 	if log == nil {
 		log = slog.New(slog.DiscardHandler)
+	}
+	if connectTimeout <= 0 {
+		connectTimeout = 30 * time.Second
 	}
 	pc, err := wrtc.NewPeerConnection(factory, log)
 	if err != nil {
 		return nil, err
 	}
 	gc := &GroupCall{
-		chatID:    chatID,
-		pc:        pc,
-		log:       log.With(slog.Int64("chat", chatID)),
-		disp:      disp,
-		ev:        ev,
-		connected: make(chan struct{}),
+		chatID:         chatID,
+		pc:             pc,
+		log:            log.With(slog.Int64("chat", chatID)),
+		disp:           disp,
+		ev:             ev,
+		connected:      make(chan struct{}),
+		connectTimeout: connectTimeout,
 	}
 	gc.netState.Store(int32(models.Connecting))
 	var wasConnected atomic.Bool
@@ -167,7 +173,7 @@ func (g *GroupCall) SetSource(ctx context.Context, src media.Source) error {
 	// channel also closes on Failed/Closed so Stop() during the wait
 	// doesn't hang for the full timeout.
 	if models.ConnState(g.netState.Load()) != models.Connected {
-		connectTimer := time.NewTimer(15 * time.Second)
+		connectTimer := time.NewTimer(g.connectTimeout)
 		select {
 		case <-g.connected:
 			connectTimer.Stop()
@@ -176,7 +182,11 @@ func (g *GroupCall) SetSource(ctx context.Context, src media.Source) error {
 			if !g.connectCalled.Load() {
 				return fmt.Errorf("%w: timed out waiting for WebRTC — Connect() was never called", models.ErrNotConnected)
 			}
-			return fmt.Errorf("%w: ICE/DTLS did not reach Connected within 15s", models.ErrNotConnected)
+			state := models.ConnState(g.netState.Load())
+			g.log.Warn("connect gate timed out",
+				slog.String("state", state.String()),
+				slog.Duration("timeout", g.connectTimeout))
+			return fmt.Errorf("%w: ICE/DTLS did not reach Connected within %s (stuck in %s)", models.ErrNotConnected, g.connectTimeout, state)
 		case <-ctx.Done():
 			connectTimer.Stop()
 			_ = streams.Close()

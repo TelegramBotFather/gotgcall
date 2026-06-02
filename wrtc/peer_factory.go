@@ -43,30 +43,17 @@ func (f *Factory) Monitor() *FactoryMonitor {
 	return f.monitor
 }
 
-// defaultSTUNServers provides server-reflexive candidates for users behind
-// NAT. Host-only candidates work when the bot is on a public IP or the NAT
-// is permissive, but symmetric NAT / cloud VPC setups need srflx to reach
-// Telegram's SFU.
-var defaultSTUNServers = []webrtc.ICEServer{
-	{URLs: []string{"stun:stun.l.google.com:19302"}},
-	{URLs: []string{"stun:stun1.l.google.com:19302"}},
-}
-
-// ICEServers returns the configured ICE server list (custom from
-// FactoryOptions.ICEServers, falling back to the built-in defaults). Used
-// by PeerConnection construction to populate webrtc.Configuration.
-// A nil iceServers field means "use defaults"; a non-nil empty slice means
-// "user explicitly disabled STUN".
+// ICEServers returns the configured ICE server list. Default is empty
+// (matching ntgcalls' group-call behavior — host candidates only, no STUN).
+// Callers behind symmetric NAT can pass STUN/TURN servers via WithICEServers.
 func (f *Factory) ICEServers() []webrtc.ICEServer {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if f.iceServers != nil {
-		out := make([]webrtc.ICEServer, len(f.iceServers))
-		copy(out, f.iceServers)
-		return out
+	if len(f.iceServers) == 0 {
+		return nil
 	}
-	out := make([]webrtc.ICEServer, len(defaultSTUNServers))
-	copy(out, defaultSTUNServers)
+	out := make([]webrtc.ICEServer, len(f.iceServers))
+	copy(out, f.iceServers)
 	return out
 }
 
@@ -80,8 +67,8 @@ func (f *Factory) LogICECandidates() bool {
 
 type FactoryOptions struct {
 	Logger *slog.Logger
-	// ICEServers overrides ICE server configuration. Default is empty (ICE-lite
-	// needs no STUN). Pass TURN servers for users behind symmetric NAT.
+	// ICEServers overrides ICE server configuration. Default is empty (host
+	// candidates only, matching ntgcalls). Pass STUN/TURN for symmetric NAT.
 	ICEServers []webrtc.ICEServer
 	// NetworkTypes overrides the candidate network-type whitelist. Default is
 	// UDP4+UDP6 (matching ntgcalls). Use this to restrict to UDP4-only or add
@@ -120,11 +107,10 @@ func NewFactory(opts FactoryOptions) (*Factory, error) {
 	// configuration — the single biggest "debug logs aren't working" complaint.
 	settings := webrtc.SettingEngine{LoggerFactory: newSlogPionFactory(log, opts.PionTraceAsDebug)}
 	settings.SetIncludeLoopbackCandidate(false)
-	// Full ICE with no STUN servers: we gather only host candidates (fast,
-	// like ntgcalls) but still actively send connectivity checks to Telegram's
-	// SFU. pion's strict ICE-lite doesn't send checks at all (RFC 8445
-	// compliant), while libwebrtc's "lite" mode still checks — so we use full
-	// ICE to match ntgcalls' actual wire behavior.
+	// Full ICE (not lite): pion's strict ICE-lite doesn't send connectivity
+	// checks (RFC 8445), while libwebrtc's "lite" still does — full ICE
+	// matches ntgcalls' actual wire behavior. No default STUN servers (host
+	// candidates only, matching ntgcalls group calls).
 	settings.SetLite(false)
 	// UDP4+UDP6: ntgcalls enables both via PORTALLOCATOR_ENABLE_IPV6. Telegram's
 	// SFU accepts IPv6 candidates, and dual-stack hosts get more candidate pairs
@@ -152,8 +138,8 @@ func NewFactory(opts FactoryOptions) (*Factory, error) {
 	}
 	settings.SetICETimeouts(disconnect, failed, keepalive)
 	// Zero per-candidate-type acceptance windows so pion considers all candidate
-	// types immediately. With default STUN we get host+srflx; zeroing the
-	// windows matches ntgcalls and avoids any stagger delay.
+	// types immediately, matching ntgcalls. When callers add STUN/TURN via
+	// WithICEServers, this avoids stagger delay for srflx/relay candidates.
 	settings.SetHostAcceptanceMinWait(0)
 	settings.SetSrflxAcceptanceMinWait(0)
 	settings.SetPrflxAcceptanceMinWait(0)

@@ -13,7 +13,7 @@ func NewAudioTrack(id, streamID string) (*webrtc.TrackLocalStaticSample, error) 
 			MimeType:    webrtc.MimeTypeOpus,
 			ClockRate:   uint32(models.OpusSampleRate),
 			Channels:    2,
-			SDPFmtpLine: "minptime=10;useinbandfec=1",
+			SDPFmtpLine: "minptime=10;useinbandfec=1;stereo=1;sprop-stereo=1;maxaveragebitrate=510000",
 		},
 		id, streamID,
 	)

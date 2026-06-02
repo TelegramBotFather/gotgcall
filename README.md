@@ -268,8 +268,8 @@ gotgcall.New(
 | `WithSharedUDPMux` | off | Opens **one** `udp4:0` socket and routes ICE for every call through it. See [UDP mux scaling](#udp-mux--scaling) below. |
 | `WithDTLSCertPool` | 8 | Background goroutine keeps N pre-generated ECDSA-P256 certs ready so `CreateCall` doesn't stall on keygen during bursts. 0 = disabled. |
 | `WithDispatchBuffer` | 256 | Size of the single callback-dispatcher channel. Larger absorbs bursts of state changes before the consumer drains. |
-| `WithICEServers` | 3× Google STUN | Replaces the default list. Add TURN entries for users behind symmetric NAT / restrictive firewalls. |
-| `WithNetworkTypes` | UDP4 only | Override the ICE candidate network-type whitelist. Enable IPv6 / TCP for restrictive environments where UDP4 is blocked. |
+| `WithICEServers` | 2× Google STUN | Overrides the default STUN list. Add TURN entries for users behind symmetric NAT / restrictive firewalls. Pass an empty slice to disable STUN entirely (host-only candidates). |
+| `WithNetworkTypes` | UDP4+UDP6 | Override the ICE candidate network-type whitelist. Add TCP for restrictive environments where UDP is blocked. |
 | `WithICETimeouts` | 60 s / 120 s / 2 s | `(disconnect, failed, keepalive)`. Bumped 2× from gortc's 30/60/2 baseline in v0.6.4 because Telegram's edge wobble on rejoin frequently takes 60-90 s to settle on a working candidate pair. Pass `0` for any value to keep the default; ultra-responsive UIs can shorten back to 30/60. |
 
 ### Enabling debug logs
@@ -453,15 +453,15 @@ All errors are sentinels — branch with `errors.Is`:
 
 ## Networking
 
-**Transport.** Pion v4 is the only WebRTC stack. We disable IPv6 and TCP ICE network types because Telegram's edge mixers favor IPv4/UDP — restricting candidate types trims the ICE checklist (faster connect) and avoids spurious failed pairings.
+**Transport.** Pion v4 is the only WebRTC stack. Full ICE mode with no STUN servers — we gather only host candidates (fast, no STUN round-trips) but still actively send connectivity checks to Telegram's SFU. This matches ntgcalls' actual wire behavior (its `ICEMODE_LITE` declaration is dead code; it runs full ICE). UDP4+UDP6 enabled by default (matching ntgcalls' `PORTALLOCATOR_ENABLE_IPV6`). DTLS role is passive/server (matching ntgcalls' `SSL_SERVER`).
 
 **Interface filter.** Virtual / VPN interfaces are skipped by name match: `vethernet`, `vmware`, `virtualbox`, `vbox`, `hyper-v`, `loopback`, `teredo`, `isatap`, `tap-`, `docker`, `wsl`, `tailscale`, `zerotier`, `openvpn`. Gathering candidates on these would slow ICE and produce unreachable pairs.
 
-**STUN.** Three Google STUN servers are configured by default so pion can gather server-reflexive candidates behind NAT (`stun.l.google.com:19302` and `stun1/2`). Without these, only host candidates are emitted and any non-LAN connection fails ICE.
+**STUN.** Two Google STUN servers are configured by default so pion can gather server-reflexive candidates behind NAT. Override with `WithICEServers`; pass an empty slice to disable STUN entirely (host-only candidates — fine when the bot has a public IP). TURN is not configured by default; pass `WithICEServers` with TURN entries for users behind symmetric NAT or restrictive firewalls.
 
-**TURN.** Not configured by default. Telegram's SFU exposes reflexive candidates in the JOIN response and our outbound NAT path is normally enough.
+**ICE-lite answer.** The synthesized answer SDP carries `a=ice-lite` at session level, telling pion that Telegram's SFU is ICE-lite (server-side, never sends connectivity checks). This lets pion's ICE state machine skip waiting for reverse checks and nominate pairs faster — without it, intermittent connection timeouts can occur when pion's timing heuristics expect checks from the remote that never arrive.
 
-**ICE timeouts.** Disconnect grace = 60 s, failed declaration = 120 s, keepalive = 2 s. Bumped 2× from gortc's 30/60/2 baseline in v0.6.4 — in practice Telegram's edge wobble on rejoin takes 60-90 s to settle on a working candidate pair, and the shorter window made pion declare Failed before the SFU finished steering. Override via `WithICETimeouts` for ultra-responsive UIs (shorter) or extra-unstable networks (longer). Pion surfaces failure via `OnConnectionStateChange(Failed)`. On top of the pion timers the `FactoryMonitor` runs a **5 s checking-stuck kill**: if a PC stays in `Connecting`/`New` for more than 5 s the monitor force-closes it — Telegram's STUN servers respond in 1-3 s so anything past 5 s is unusable.
+**ICE timeouts.** Disconnect grace = 60 s, failed declaration = 120 s, keepalive = 2 s. Bumped 2× from gortc's 30/60/2 baseline in v0.6.4 — in practice Telegram's edge wobble on rejoin takes 60-90 s to settle on a working candidate pair, and the shorter window made pion declare Failed before the SFU finished steering. Override via `WithICETimeouts` for ultra-responsive UIs (shorter) or extra-unstable networks (longer). Pion surfaces failure via `OnConnectionStateChange(Failed)`. On top of the pion timers the `FactoryMonitor` runs a **30 s checking-stuck safety net**: if a PC stays in `Connecting`/`New` for more than 30 s the monitor force-closes it. This is a last resort — the `SetSource` connection gate (15 s) fires first with a clean `ErrNotConnected` for normal use.
 
 **UDP mux.** Default behavior: each call binds its own UDP socket. Enable `WithSharedUDPMux()` to route every call through one shared `udp4:0` socket. Useful at 100+ concurrent calls where you don't want N ephemeral ports open.
 

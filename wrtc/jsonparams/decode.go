@@ -51,6 +51,14 @@ func SynthesizeAnswerSDP(offerSDP string, rp *RemoteParams) (string, error) {
 		},
 	}
 
+	// Telegram's SFU is ICE-lite (server-side, never sends connectivity
+	// checks). Declaring this in the answer lets pion skip waiting for
+	// reverse checks and nominate pairs faster — without it pion's ICE
+	// state machine may intermittently time out waiting for checks from
+	// the SFU that never arrive. gortc emits this; ntgcalls' libwebrtc
+	// infers it from the remote transport description.
+	ans.Attributes = append(ans.Attributes, sdp.NewPropertyAttribute("ice-lite"))
+
 	// Copy session-level group attribute (BUNDLE).
 	for _, a := range off.Attributes {
 		if a.Key == "group" || a.Key == "msid-semantic" {

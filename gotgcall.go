@@ -173,8 +173,9 @@ func WithDispatchBuffer(n int) Option {
 	}
 }
 
-// WithICEServers adds ICE servers. Default is empty (ICE-lite needs no STUN).
+// WithICEServers overrides the default ICE server list (2 Google STUN servers).
 // Pass TURN entries for users behind symmetric NAT or restrictive firewalls.
+// Pass an empty slice to disable STUN entirely (host-only candidates).
 //
 //	gotgcall.WithICEServers([]gotgcall.ICEServer{
 //	    {URLs: []string{"turn:turn.example.com:3478"},
@@ -182,16 +183,14 @@ func WithDispatchBuffer(n int) Option {
 //	})
 func WithICEServers(servers []ICEServer) Option {
 	return func(c *config) {
-		if len(servers) > 0 {
-			c.iceServers = servers
-		}
+		c.iceServers = servers
 	}
 }
 
 // WithNetworkTypes overrides the ICE candidate network-type whitelist.
-// Default is UDP4 only (Telegram's edge mixers favor IPv4/UDP, and trimming
-// the checklist speeds up ICE). Enable IPv6 / TCP for restrictive
-// environments where UDP4 is blocked.
+// Default is UDP4+UDP6 (matching ntgcalls' PORTALLOCATOR_ENABLE_IPV6).
+// Telegram's SFU accepts IPv6 candidates and dual-stack hosts get more
+// candidate pairs. Add TCP for restrictive environments where UDP is blocked.
 //
 //	gotgcall.WithNetworkTypes(
 //	    gotgcall.NetworkTypeUDP4,

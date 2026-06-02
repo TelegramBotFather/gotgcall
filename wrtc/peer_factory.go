@@ -43,18 +43,32 @@ func (f *Factory) Monitor() *FactoryMonitor {
 	return f.monitor
 }
 
+// defaultSTUNServers provides server-reflexive candidates for users behind
+// NAT. Host-only candidates work when the bot is on a public IP or the NAT
+// is permissive, but symmetric NAT / cloud VPC setups need srflx to reach
+// Telegram's SFU. gortc ships 7 servers; we use a smaller set to keep
+// gathering fast while still getting a reflexive candidate.
+var defaultSTUNServers = []webrtc.ICEServer{
+	{URLs: []string{"stun:stun.l.google.com:19302"}},
+	{URLs: []string{"stun:stun1.l.google.com:19302"}},
+}
+
 // ICEServers returns the configured ICE server list (custom from
 // FactoryOptions.ICEServers, falling back to the built-in defaults). Used
 // by PeerConnection construction to populate webrtc.Configuration.
+// A nil iceServers field means "use defaults"; a non-nil empty slice means
+// "user explicitly disabled STUN".
 func (f *Factory) ICEServers() []webrtc.ICEServer {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if len(f.iceServers) > 0 {
+	if f.iceServers != nil {
 		out := make([]webrtc.ICEServer, len(f.iceServers))
 		copy(out, f.iceServers)
 		return out
 	}
-	return nil
+	out := make([]webrtc.ICEServer, len(defaultSTUNServers))
+	copy(out, defaultSTUNServers)
+	return out
 }
 
 // LogICECandidates reports whether PeerConnection construction should hook
@@ -139,8 +153,8 @@ func NewFactory(opts FactoryOptions) (*Factory, error) {
 	}
 	settings.SetICETimeouts(disconnect, failed, keepalive)
 	// Zero per-candidate-type acceptance windows so pion considers all candidate
-	// types immediately. With ICE-lite we only have host candidates, but zeroing
-	// these matches ntgcalls and avoids any stagger delay.
+	// types immediately. With default STUN we get host+srflx; zeroing the
+	// windows matches ntgcalls and avoids any stagger delay.
 	settings.SetHostAcceptanceMinWait(0)
 	settings.SetSrflxAcceptanceMinWait(0)
 	settings.SetPrflxAcceptanceMinWait(0)
@@ -150,6 +164,7 @@ func NewFactory(opts FactoryOptions) (*Factory, error) {
 	// candidate-gather pass does N substring scans rather than re-walking
 	// a literal slice every time.
 	settings.SetInterfaceFilter(makeInterfaceFilter())
+	settings.SetIPFilter(makeIPFilter())
 
 	f := &Factory{
 		settings:         settings,
@@ -251,14 +266,26 @@ func makeInterfaceFilter() func(string) bool {
 	}
 }
 
+// makeIPFilter excludes IPs from subnets that produce unreachable ICE
+// candidates. Windows ICS (192.168.137.0/24) is the primary one — gortc
+// also filters this.
+func makeIPFilter() func(ip net.IP) bool {
+	icsNet := net.IPNet{IP: net.IP{192, 168, 137, 0}, Mask: net.CIDRMask(24, 32)}
+	return func(ip net.IP) bool {
+		return !icsNet.Contains(ip)
+	}
+}
+
 func registerCodecs(m *webrtc.MediaEngine) error {
-	// Audio: Opus PT 111 (Telegram standard).
+	// Audio: Opus PT 111 (Telegram standard). The fmtp line declares stereo
+	// and a high max bitrate so Telegram's SFU allocates bandwidth for music
+	// rather than speech — matching gortc's parameters.
 	if err := m.RegisterCodec(webrtc.RTPCodecParameters{
 		RTPCodecCapability: webrtc.RTPCodecCapability{
 			MimeType:     webrtc.MimeTypeOpus,
 			ClockRate:    uint32(models.OpusSampleRate),
 			Channels:     2,
-			SDPFmtpLine:  "minptime=10;useinbandfec=1",
+			SDPFmtpLine:  "minptime=10;useinbandfec=1;stereo=1;sprop-stereo=1;maxaveragebitrate=510000",
 			RTCPFeedback: []webrtc.RTCPFeedback{{Type: "transport-cc"}},
 		},
 		PayloadType: models.OpusPayloadType,

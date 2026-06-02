@@ -173,12 +173,10 @@ func WithDispatchBuffer(n int) Option {
 	}
 }
 
-// WithICEServers replaces the default Google STUN servers. Pass TURN entries
-// here for users behind symmetric NAT or restrictive firewalls. Pass an
-// empty slice to keep the defaults.
+// WithICEServers adds ICE servers. Default is empty (ICE-lite needs no STUN).
+// Pass TURN entries for users behind symmetric NAT or restrictive firewalls.
 //
 //	gotgcall.WithICEServers([]gotgcall.ICEServer{
-//	    {URLs: []string{"stun:stun.l.google.com:19302"}},
 //	    {URLs: []string{"turn:turn.example.com:3478"},
 //	     Username: "u", Credential: "p"},
 //	})

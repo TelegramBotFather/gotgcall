@@ -18,16 +18,6 @@ import (
 // is now a thin forwarder.
 type connStateFn func(models.ConnState)
 
-// defaultSTUNServers gives pion at least one reflexive-address server so it
-// can gather srflx candidates behind NATs. Without these, only host
-// candidates are emitted and any non-LAN connection fails ICE.
-// Used only when the Factory has no caller-supplied ICEServers.
-var defaultSTUNServers = []webrtc.ICEServer{
-	{URLs: []string{"stun:stun.l.google.com:19302"}},
-	{URLs: []string{"stun:stun1.l.google.com:19302"}},
-	{URLs: []string{"stun:stun2.l.google.com:19302"}},
-}
-
 // PeerConnection wraps pion's PeerConnection with Telegram-specific
 // signaling glue. One per group-call instance. Send-only audio+video.
 type PeerConnection struct {
@@ -65,15 +55,11 @@ func NewPeerConnection(f *Factory, log *slog.Logger) (*PeerConnection, error) {
 		log = slog.New(slog.DiscardHandler)
 	}
 
-	iceServers := f.ICEServers()
-	if len(iceServers) == 0 {
-		iceServers = defaultSTUNServers
-	}
 	pc, err := f.NewPeerConnection(webrtc.Configuration{
 		BundlePolicy:  webrtc.BundlePolicyMaxBundle,
 		RTCPMuxPolicy: webrtc.RTCPMuxPolicyRequire,
 		SDPSemantics:  webrtc.SDPSemanticsUnifiedPlan,
-		ICEServers:    iceServers,
+		ICEServers:    f.ICEServers(),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("create peer connection: %w", err)
@@ -197,8 +183,11 @@ func senderSSRC(s *webrtc.RTPSender) uint32 {
 }
 
 // LocalParams returns the JSON string to send to Telegram via
-// phone.joinGroupCall. Generates the offer internally.
+// phone.joinGroupCall. Generates the offer internally and waits for ICE
+// gathering to complete. With ICE-lite this is near-instant (host candidates
+// only, no STUN round-trips).
 func (p *PeerConnection) LocalParams() (string, error) {
+	gatherDone := webrtc.GatheringCompletePromise(p.pc)
 	offer, err := p.pc.CreateOffer(nil)
 	if err != nil {
 		return "", fmt.Errorf("%w: create offer: %v", models.ErrInternal, err)
@@ -206,6 +195,7 @@ func (p *PeerConnection) LocalParams() (string, error) {
 	if err = p.pc.SetLocalDescription(offer); err != nil {
 		return "", fmt.Errorf("%w: set local: %v", models.ErrInternal, err)
 	}
+	<-gatherDone
 	return jsonparams.FromOfferSDP(offer.SDP, p.audioSSRC, p.videoSSRC)
 }
 

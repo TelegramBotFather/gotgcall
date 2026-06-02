@@ -25,9 +25,11 @@ func FromOfferSDP(offerSDP string, audioSSRC, videoSSRC uint32) (string, error) 
 	lp := LocalParams{SSRC: audioSSRC}
 
 	// ICE creds and DTLS fingerprint may live at session level or per-media.
+	// setup=passive: we are the DTLS server (matching ntgcalls' SSL_SERVER role).
+	// Telegram's SFU initiates the DTLS handshake as the active/client side.
 	lp.Ufrag, lp.Pwd = sessionAttr(&s, "ice-ufrag"), sessionAttr(&s, "ice-pwd")
 	if fp := sessionAttr(&s, "fingerprint"); fp != "" {
-		lp.Fingerprints = append(lp.Fingerprints, parseFingerprint(fp, "active"))
+		lp.Fingerprints = append(lp.Fingerprints, parseFingerprint(fp, "passive"))
 	}
 
 	seenAudio, seenVideo := false, false
@@ -35,7 +37,6 @@ func FromOfferSDP(offerSDP string, audioSSRC, videoSSRC uint32) (string, error) 
 		ufrag := mediaAttr(md, "ice-ufrag")
 		pwd := mediaAttr(md, "ice-pwd")
 		fp := mediaAttr(md, "fingerprint")
-		setup := mediaAttr(md, "setup")
 		if ufrag != "" {
 			lp.Ufrag = ufrag
 		}
@@ -43,7 +44,7 @@ func FromOfferSDP(offerSDP string, audioSSRC, videoSSRC uint32) (string, error) 
 			lp.Pwd = pwd
 		}
 		if fp != "" {
-			lp.Fingerprints = []Fingerprint{parseFingerprint(fp, setup)}
+			lp.Fingerprints = []Fingerprint{parseFingerprint(fp, "passive")}
 		}
 
 		switch md.MediaName.Media {
@@ -123,7 +124,7 @@ func parseFingerprint(raw, setup string) Fingerprint {
 		fp.Fingerprint = raw
 	}
 	if fp.Setup == "" {
-		fp.Setup = "active"
+		fp.Setup = "passive"
 	}
 	return fp
 }

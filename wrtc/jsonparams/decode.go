@@ -99,15 +99,10 @@ func mirrorMediaSection(om *sdp.MediaDescription, rp *RemoteParams) *sdp.MediaDe
 			sdp.NewAttribute("fingerprint", fp.Hash+" "+fp.Fingerprint),
 		)
 	}
-	// Setup role: if offer was actpass/active, answer is passive.
-	role := "passive"
-	for _, a := range om.Attributes {
-		if a.Key == "setup" && a.Value == "passive" {
-			role = "active"
-			break
-		}
-	}
-	am.Attributes = append(am.Attributes, sdp.NewAttribute("setup", role))
+	// DTLS role: Telegram's SFU is the active/client side (initiates the DTLS
+	// handshake), we are passive/server. The answer always carries setup=active
+	// so pion (as offerer) derives that it is the DTLS server.
+	am.Attributes = append(am.Attributes, sdp.NewAttribute("setup", "active"))
 
 	// mid, rtcp-mux, direction (recvonly since we're send-only).
 	for _, a := range om.Attributes {

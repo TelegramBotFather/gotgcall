@@ -67,13 +67,12 @@ func (f *Factory) LogICECandidates() bool {
 
 type FactoryOptions struct {
 	Logger *slog.Logger
-	// ICEServers replaces the default STUN list. Pass nil/empty to use the
-	// built-in Google STUN servers. Use this to add TURN for users behind
-	// symmetric NAT / restrictive firewalls.
+	// ICEServers overrides ICE server configuration. Default is empty (ICE-lite
+	// needs no STUN). Pass TURN servers for users behind symmetric NAT.
 	ICEServers []webrtc.ICEServer
-	// NetworkTypes overrides the candidate network-type whitelist. Default
-	// is UDP4 only (Telegram's edge mixers favor IPv4/UDP). Use this to
-	// enable IPv6 or TCP if your environment requires it.
+	// NetworkTypes overrides the candidate network-type whitelist. Default is
+	// UDP4+UDP6 (matching ntgcalls). Use this to restrict to UDP4-only or add
+	// TCP if your environment requires it.
 	NetworkTypes []webrtc.NetworkType
 	CertPoolSize int
 	// ICEDisconnectTimeout — pion declares the call disconnected after this
@@ -108,25 +107,23 @@ func NewFactory(opts FactoryOptions) (*Factory, error) {
 	// configuration — the single biggest "debug logs aren't working" complaint.
 	settings := webrtc.SettingEngine{LoggerFactory: newSlogPionFactory(log, opts.PionTraceAsDebug)}
 	settings.SetIncludeLoopbackCandidate(false)
-	settings.SetLite(false)
-	// Telegram's edge mixers favor IPv4/UDP. Restricting candidate types here
-	// trims the ICE checklist (faster connect) and avoids spurious failed
-	// pairings over IPv6 / TCP that Telegram doesn't accept anyway. Caller
-	// can override via FactoryOptions.NetworkTypes for restrictive environments
-	// where IPv6 or TCP is the only viable path.
+	// ICE-lite: we only gather host candidates and respond to connectivity
+	// checks from Telegram's full-ICE SFU. Matches ntgcalls' ICEMODE_LITE +
+	// ICEROLE_CONTROLLED. Eliminates STUN gathering delays — the #1 cause of
+	// "ICE stuck in Checking" in production.
+	settings.SetLite(true)
+	// UDP4+UDP6: ntgcalls enables both via PORTALLOCATOR_ENABLE_IPV6. Telegram's
+	// SFU accepts IPv6 candidates, and dual-stack hosts get more candidate pairs
+	// to work with. Caller can override via FactoryOptions.NetworkTypes.
 	networkTypes := opts.NetworkTypes
 	if len(networkTypes) == 0 {
-		networkTypes = []webrtc.NetworkType{webrtc.NetworkTypeUDP4}
+		networkTypes = []webrtc.NetworkType{webrtc.NetworkTypeUDP4, webrtc.NetworkTypeUDP6}
 	}
 	settings.SetNetworkTypes(networkTypes)
 	// ICE timeouts: 60 s disconnect grace, 120 s before declaring failed, 2 s
-	// keepalive. Bumped 2× from the gortc baseline (30 s / 60 s) because in
-	// practice Telegram's edge wobble — especially on rejoins to the same chat
-	// — frequently takes 60–90 s to settle into a working candidate pair. The
-	// shorter window made pion declare Failed before the SFU had a chance to
-	// finish steering, producing spurious "connection failed" reports.
-	// Override via FactoryOptions.ICE* for ultra-responsive UIs (shorter) or
-	// extra-unstable networks (longer).
+	// keepalive. With ICE-lite the connect is faster (no STUN round-trips), but
+	// we keep generous timeouts for network wobble during Telegram SFU steering.
+	// Override via FactoryOptions.ICE* fields.
 	disconnect := opts.ICEDisconnectTimeout
 	if disconnect == 0 {
 		disconnect = 60 * time.Second
@@ -140,13 +137,9 @@ func NewFactory(opts FactoryOptions) (*Factory, error) {
 		keepalive = 2 * time.Second // unchanged — more-frequent keepalive helps NAT bindings
 	}
 	settings.SetICETimeouts(disconnect, failed, keepalive)
-	// Zero per-candidate-type acceptance windows. pion's defaults stagger
-	// host / srflx / prflx / relay acceptance to give "better" types a head
-	// start; the ntgcalls equivalent (kMinimumStepDelay in
-	// native_connection.cpp:97) zeros these because Telegram's edge mixers
-	// respond fast and waiting on type windows just inflates first-media
-	// latency, especially on rejoins to the same chat. Combine with the
-	// UDP4-only NetworkTypes default above for the snappiest ICE.
+	// Zero per-candidate-type acceptance windows so pion considers all candidate
+	// types immediately. With ICE-lite we only have host candidates, but zeroing
+	// these matches ntgcalls and avoids any stagger delay.
 	settings.SetHostAcceptanceMinWait(0)
 	settings.SetSrflxAcceptanceMinWait(0)
 	settings.SetPrflxAcceptanceMinWait(0)

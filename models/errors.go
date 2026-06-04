@@ -5,7 +5,7 @@ import "errors"
 var (
 	ErrConnectionExists   = errors.New("gotgcall: call already exists for chat")
 	ErrConnectionNotFound = errors.New("gotgcall: no call for chat")
-	ErrConnectionFailed = errors.New("gotgcall: ICE failed permanently")
+	ErrConnectionFailed   = errors.New("gotgcall: ICE failed permanently")
 	ErrInvalidParams      = errors.New("gotgcall: malformed telegram params")
 	ErrFFmpegSpawn        = errors.New("gotgcall: ffmpeg failed to start")
 	ErrFFmpegCrashed      = errors.New("gotgcall: ffmpeg exited non-zero")

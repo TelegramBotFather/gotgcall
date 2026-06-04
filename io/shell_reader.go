@@ -169,9 +169,19 @@ func (r *ShellReader) reap() {
 	err := r.cmd.Wait()
 	if err != nil {
 		if exitErr, ok := errors.AsType[*exec.ExitError](err); ok {
+			code := exitErr.ExitCode()
 			tail := r.stderr.Snapshot()
+			// exit=-1 with empty stderr is the unambiguous signature of
+			// our own context.CancelFunc firing during Pause/Stop —
+			// ffmpeg is SIGKILL'd before it can write anything. Surfacing
+			// this as ErrFFmpegCrashed (and logging it as "exited with
+			// error") was pure noise; the natural EOF on stdout already
+			// tells consumers the stream ended.
+			if code == -1 && len(tail) == 0 {
+				return
+			}
 			err = fmt.Errorf("%w: exit=%d stderr=%q",
-				models.ErrFFmpegCrashed, exitErr.ExitCode(), trimTail(tail))
+				models.ErrFFmpegCrashed, code, trimTail(tail))
 		}
 		r.waitErr.Store(&err)
 		r.log.Debug("shell_reader: process exited with error", slog.Any("err", err))

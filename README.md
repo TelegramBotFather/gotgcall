@@ -226,7 +226,7 @@ type EncodeOptions struct {
     VideoWidth       int   // default 1280
     VideoHeight      int   // default 720
     VideoFPS         int   // default 30
-    AudioBitrateKbps int   // default 64
+    AudioBitrateKbps int   // default 128 (music-grade; bump to 192+ for transparent quality, Telegram fmtp accepts up to 510)
     AudioChannels    int   // default 2
     Tracks           Track // default TrackAudio; TrackVideo implies +TrackAudio
 }

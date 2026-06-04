@@ -79,7 +79,12 @@ func (o EncodeOptions) withDefaults() EncodeOptions {
 		o.VideoFPS = 30
 	}
 	if o.AudioBitrateKbps == 0 {
-		o.AudioBitrateKbps = 64
+		// 128 kbps Opus is the floor for music: below it the encoder strips
+		// high-frequency detail (perceived as "hiss") and tightens the bass
+		// range (perceived as "thin"). 64 kbps was the previous default —
+		// fine for voice/conferencing, terrible for a music bot. Telegram's
+		// fmtp negotiates up to 510 kbps so any bump here is safe wire-wise.
+		o.AudioBitrateKbps = 128
 	}
 	if o.AudioChannels == 0 {
 		o.AudioChannels = 2

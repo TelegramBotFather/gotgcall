@@ -185,8 +185,7 @@ func senderSSRC(s *webrtc.RTPSender) uint32 {
 
 // LocalParams returns the JSON string to send to Telegram via
 // phone.joinGroupCall. Generates the offer internally and waits for ICE
-// gathering to complete. With ICE-lite this is near-instant (host candidates
-// only, no STUN round-trips).
+// gathering to complete.
 func (p *PeerConnection) LocalParams() (string, error) {
 	gatherDone := webrtc.GatheringCompletePromise(p.pc)
 	offer, err := p.pc.CreateOffer(nil)
@@ -197,7 +196,15 @@ func (p *PeerConnection) LocalParams() (string, error) {
 		return "", fmt.Errorf("%w: set local: %v", models.ErrInternal, err)
 	}
 	<-gatherDone
-	return jsonparams.FromOfferSDP(offer.SDP, p.audioSSRC, p.videoSSRC)
+	final := p.pc.LocalDescription()
+	if final != nil {
+		p.log.Debug("LocalParams: offer SDP (post-gather)", slog.String("sdp", final.SDP))
+	}
+	js, err := jsonparams.FromOfferSDP(offer.SDP, p.audioSSRC, p.videoSSRC)
+	if err == nil {
+		p.log.Debug("LocalParams: join payload", slog.String("json", js))
+	}
+	return js, err
 }
 
 // Connect finalizes the handshake using Telegram's response JSON.

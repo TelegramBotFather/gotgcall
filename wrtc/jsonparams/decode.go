@@ -3,8 +3,6 @@ package jsonparams
 import (
 	"encoding/json"
 	"fmt"
-	"net"
-	"strconv"
 	"strings"
 
 	"github.com/pion/sdp/v3"
@@ -53,12 +51,12 @@ func SynthesizeAnswerSDP(offerSDP string, rp *RemoteParams) (string, error) {
 		},
 	}
 
-	// Telegram's SFU is ICE-lite (server-side, never sends connectivity
-	// checks). Declaring this in the answer lets pion skip waiting for
-	// reverse checks and nominate pairs faster — without it pion's ICE
-	// state machine may intermittently time out waiting for checks from
-	// the SFU that never arrive.
-	ans.Attributes = append(ans.Attributes, sdp.NewPropertyAttribute("ice-lite"))
+	// No a=ice-lite: empirically some Telegram SFU instances act as full
+	// ICE and respond to pion's checks with 487 Role Conflict; declaring
+	// the remote lite forces pion into solo-controller mode and it can't
+	// renegotiate the role, so every check is rejected and the call is
+	// stuck in Checking. Let pion run full ICE with normal role
+	// negotiation — slower under "true lite" SFUs but works against both.
 
 	// Copy session-level group attribute (BUNDLE).
 	for _, a := range off.Attributes {
@@ -81,21 +79,18 @@ func SynthesizeAnswerSDP(offerSDP string, rp *RemoteParams) (string, error) {
 
 // mirrorMediaSection builds an answer m-section that mirrors the offer's
 // codec/extension/mid set but substitutes Telegram's transport info.
-// IPv6 candidates are filtered out — Telegram's group-call SFU only
-// operates over IPv4, and stale IPv6 entries waste ICE pairing time.
 func mirrorMediaSection(om *sdp.MediaDescription, rp *RemoteParams) *sdp.MediaDescription {
-	remoteIP, remotePort := findFirstIPv4Candidate(rp.Transport.Candidates)
 	am := &sdp.MediaDescription{
 		MediaName: sdp.MediaName{
 			Media:   om.MediaName.Media,
-			Port:    sdp.RangedPort{Value: remotePort},
+			Port:    sdp.RangedPort{Value: 9},
 			Protos:  om.MediaName.Protos,
 			Formats: om.MediaName.Formats,
 		},
 		ConnectionInformation: &sdp.ConnectionInformation{
 			NetworkType: "IN",
 			AddressType: "IP4",
-			Address:     &sdp.Address{Address: remoteIP},
+			Address:     &sdp.Address{Address: "0.0.0.0"},
 		},
 	}
 
@@ -111,12 +106,11 @@ func mirrorMediaSection(om *sdp.MediaDescription, rp *RemoteParams) *sdp.MediaDe
 			sdp.NewAttribute("fingerprint", fp.Hash+" "+fp.Fingerprint),
 		)
 	}
-	// DTLS role: derive from Telegram's fingerprint "setup" field. Telegram's
-	// SFU typically sends "active" (it initiates the DTLS handshake, we are
-	// passive/server — matching ntgcalls' hardcoded SSL_SERVER). If the field
-	// is missing or unrecognized, default to "active" for backwards compat.
-	setup := remoteSetup(rp)
-	am.Attributes = append(am.Attributes, sdp.NewAttribute("setup", setup))
+	// DTLS role: setup=active in the answer makes pion (the offerer) the
+	// DTLS server, Telegram the client. Hardcoded — Telegram's fp.Setup
+	// often echoes our own "passive" and forwarding it deadlocks DTLS.
+	// Matches ntgcalls' GroupConnection (which ignores the response setup).
+	am.Attributes = append(am.Attributes, sdp.NewAttribute("setup", "active"))
 
 	// mid, rtcp-mux, direction (recvonly since we're send-only).
 	for _, a := range om.Attributes {
@@ -135,11 +129,9 @@ func mirrorMediaSection(om *sdp.MediaDescription, rp *RemoteParams) *sdp.MediaDe
 		}
 	}
 
-	// ICE candidates from Telegram — IPv4 only.
+	// ICE candidates from Telegram — pass through both IPv4 and IPv6; pion
+	// will pair against whatever the local network can actually reach.
 	for _, c := range rp.Transport.Candidates {
-		if ip := net.ParseIP(c.IP); ip == nil || ip.To4() == nil {
-			continue
-		}
 		am.Attributes = append(am.Attributes, sdp.NewAttribute("candidate", candidateToSDP(c)))
 	}
 	am.Attributes = append(am.Attributes, sdp.NewPropertyAttribute("end-of-candidates"))
@@ -189,25 +181,3 @@ func candidateToSDP(c Candidate) string {
 	return b.String()
 }
 
-func remoteSetup(rp *RemoteParams) string {
-	for _, fp := range rp.Transport.Fingerprints {
-		switch fp.Setup {
-		case "active", "passive", "actpass":
-			return fp.Setup
-		}
-	}
-	return "active"
-}
-
-func findFirstIPv4Candidate(candidates []Candidate) (string, int) {
-	for _, c := range candidates {
-		if ip := net.ParseIP(c.IP); ip != nil && ip.To4() != nil {
-			port, _ := strconv.Atoi(c.Port)
-			if port == 0 {
-				port = 1
-			}
-			return c.IP, port
-		}
-	}
-	return "0.0.0.0", 9
-}

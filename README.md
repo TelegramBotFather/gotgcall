@@ -302,7 +302,7 @@ slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
 
 ### UDP mux & scaling
 
-The old README said "use `WithSharedUDPMux` at 100+ calls". That was a conservative guess — the real picture:
+The README said "use `WithSharedUDPMux` at 100+ calls". That was a conservative guess — the real picture:
 
 **Default (one socket per call):**
 - 1 UDP socket = 1 file descriptor + 1 ephemeral port per call.

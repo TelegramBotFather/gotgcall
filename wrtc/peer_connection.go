@@ -196,11 +196,12 @@ func (p *PeerConnection) LocalParams() (string, error) {
 		return "", fmt.Errorf("%w: set local: %v", models.ErrInternal, err)
 	}
 	<-gatherDone
-	final := p.pc.LocalDescription()
-	if final != nil {
-		p.log.Debug("LocalParams: offer SDP (post-gather)", slog.String("sdp", final.SDP))
+	sdpStr := offer.SDP
+	if final := p.pc.LocalDescription(); final != nil {
+		sdpStr = final.SDP
 	}
-	js, err := jsonparams.FromOfferSDP(offer.SDP, p.audioSSRC, p.videoSSRC)
+	p.log.Debug("LocalParams: offer SDP (post-gather)", slog.String("sdp", sdpStr))
+	js, err := jsonparams.FromOfferSDP(sdpStr, p.audioSSRC, p.videoSSRC)
 	if err == nil {
 		p.log.Debug("LocalParams: join payload", slog.String("json", js))
 	}

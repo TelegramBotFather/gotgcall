@@ -43,17 +43,30 @@ func (f *Factory) Monitor() *FactoryMonitor {
 	return f.monitor
 }
 
-// ICEServers returns the configured ICE server list. Default is empty
-// (matching ntgcalls' group-call behavior — host candidates only, no STUN).
-// Callers behind symmetric NAT can pass STUN/TURN servers via WithICEServers.
+// defaultSTUNServers provides server-reflexive candidates for bots
+// behind NAT (Docker, cloud VMs without bound public IPs, symmetric
+// home routers). Host-only candidates work when the process has a
+// direct public IP, but anything NAT'd needs srflx — otherwise
+// Telegram's SFU receives STUN checks from an address it never saw
+// in our join payload and rejects every Binding request.
+var defaultSTUNServers = []webrtc.ICEServer{
+	{URLs: []string{"stun:stun.l.google.com:19302"}},
+	{URLs: []string{"stun:stun1.l.google.com:19302"}},
+}
+
+// ICEServers returns the configured ICE server list. nil iceServers
+// means "use defaults" (Google STUN); a non-nil empty slice means the
+// caller explicitly disabled STUN.
 func (f *Factory) ICEServers() []webrtc.ICEServer {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if len(f.iceServers) == 0 {
-		return nil
+	if f.iceServers != nil {
+		out := make([]webrtc.ICEServer, len(f.iceServers))
+		copy(out, f.iceServers)
+		return out
 	}
-	out := make([]webrtc.ICEServer, len(f.iceServers))
-	copy(out, f.iceServers)
+	out := make([]webrtc.ICEServer, len(defaultSTUNServers))
+	copy(out, defaultSTUNServers)
 	return out
 }
 
@@ -67,8 +80,10 @@ func (f *Factory) LogICECandidates() bool {
 
 type FactoryOptions struct {
 	Logger *slog.Logger
-	// ICEServers overrides ICE server configuration. Default is empty (host
-	// candidates only, matching ntgcalls). Pass STUN/TURN for symmetric NAT.
+	// ICEServers overrides ICE server configuration. Default (nil) uses
+	// Google's public STUN so NAT'd bots discover a public srflx
+	// candidate. Pass an empty (non-nil) slice to disable STUN entirely;
+	// pass TURN entries for restrictive networks.
 	ICEServers []webrtc.ICEServer
 	// NetworkTypes overrides the candidate network-type whitelist. Default is
 	// UDP4+UDP6 (matching ntgcalls). Use this to restrict to UDP4-only or add
@@ -109,8 +124,11 @@ func NewFactory(opts FactoryOptions) (*Factory, error) {
 	settings.SetIncludeLoopbackCandidate(false)
 	// Full ICE (not lite): pion's strict ICE-lite doesn't send connectivity
 	// checks (RFC 8445), while libwebrtc's "lite" still does — full ICE
-	// matches ntgcalls' actual wire behavior. No default STUN servers (host
-	// candidates only, matching ntgcalls group calls).
+	// matches ntgcalls' actual wire behavior. Default STUN is on (see
+	// defaultSTUNServers) so NAT'd bots — Docker, cloud VMs without a
+	// bound public IP — gather a srflx candidate; without it Telegram's
+	// SFU rejects every STUN check because the source address (post-NAT)
+	// never appeared in the join payload.
 	settings.SetLite(false)
 	// UDP4+UDP6: ntgcalls enables both via PORTALLOCATOR_ENABLE_IPV6. Telegram's
 	// SFU accepts IPv6 candidates, and dual-stack hosts get more candidate pairs
@@ -120,10 +138,9 @@ func NewFactory(opts FactoryOptions) (*Factory, error) {
 		networkTypes = []webrtc.NetworkType{webrtc.NetworkTypeUDP4, webrtc.NetworkTypeUDP6}
 	}
 	settings.SetNetworkTypes(networkTypes)
-	// ICE timeouts: 60 s disconnect grace, 120 s before declaring failed, 2 s
-	// keepalive. With ICE-lite the connect is faster (no STUN round-trips), but
-	// we keep generous timeouts for network wobble during Telegram SFU steering.
-	// Override via FactoryOptions.ICE* fields.
+	// ICE timeouts: 60 s disconnect grace, 120 s before declaring failed,
+	// 2 s keepalive. Generous to absorb Telegram SFU steering and re-
+	// pairing on cross-DC moves. Override via FactoryOptions.ICE* fields.
 	disconnect := opts.ICEDisconnectTimeout
 	if disconnect == 0 {
 		disconnect = 60 * time.Second
@@ -137,9 +154,9 @@ func NewFactory(opts FactoryOptions) (*Factory, error) {
 		keepalive = 2 * time.Second // unchanged — more-frequent keepalive helps NAT bindings
 	}
 	settings.SetICETimeouts(disconnect, failed, keepalive)
-	// Zero per-candidate-type acceptance windows so pion considers all candidate
-	// types immediately, matching ntgcalls. When callers add STUN/TURN via
-	// WithICEServers, this avoids stagger delay for srflx/relay candidates.
+	// Zero per-candidate-type acceptance windows so pion considers host
+	// and srflx candidates immediately — no stagger delay before the
+	// srflx (the only routable candidate behind NAT) gets used.
 	settings.SetHostAcceptanceMinWait(0)
 	settings.SetSrflxAcceptanceMinWait(0)
 	settings.SetPrflxAcceptanceMinWait(0)

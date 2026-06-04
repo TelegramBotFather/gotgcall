@@ -392,16 +392,27 @@ func (c *Client) CreateCall(chatID int64) (string, error) {
 		return "", err
 	}
 	c.calls.Store(chatID, instances.Call(gc))
-	return gc.CreateLocalParams()
+	params, err := gc.CreateLocalParams()
+	if err != nil {
+		c.reap(chatID)
+		return "", err
+	}
+	return params, nil
 }
 
 // Connect finishes the WebRTC handshake using Telegram's response JSON.
+// On error the call is auto-reaped so the caller can immediately retry
+// CreateCall without coordinating a separate Stop.
 func (c *Client) Connect(chatID int64, telegramParams string) error {
 	call, err := c.lookup(chatID)
 	if err != nil {
 		return err
 	}
-	return call.Connect(telegramParams)
+	if err = call.Connect(telegramParams); err != nil {
+		c.reap(chatID)
+		return err
+	}
+	return nil
 }
 
 // --- Lifecycle: RTMP mode ------------------------------------------------------
@@ -445,17 +456,40 @@ func (c *Client) callIsLive(chatID int64) bool {
 	return true
 }
 
+// reap removes the per-chat call entry and tears it down. Used by every
+// setup-phase API (CreateCall, Connect, SetStreamSources) when the call
+// returns an error so the caller doesn't need to remember to invoke Stop
+// separately. Safe if the entry is already gone (e.g. concurrent Stop).
+func (c *Client) reap(chatID int64) {
+	v, ok := c.calls.LoadAndDelete(chatID)
+	if !ok {
+		return
+	}
+	c.createMu.Delete(chatID)
+	_ = v.(instances.Call).Stop()
+}
+
 // --- Lifecycle: source control --------------------------------------------------
 
 // SetStreamSources installs or replaces the streaming source for chatID.
 // Encode options (FPS, tracks, bitrates) ride along with the Source — set
 // them on the constructor (FromFile/FromURL).
+//
+// On error the call is auto-reaped (closed and removed from the per-client
+// registry) so the caller can immediately retry CreateCall without first
+// invoking Stop. This covers the failure modes the user would otherwise
+// need to clean up by hand: ICE/DTLS gate timeout, "connection closed
+// during setup", and ffmpeg / source-open errors.
 func (c *Client) SetStreamSources(chatID int64, src Source) error {
 	call, err := c.lookup(chatID)
 	if err != nil {
 		return err
 	}
-	return call.SetSource(context.Background(), src)
+	if err = call.SetSource(context.Background(), src); err != nil {
+		c.reap(chatID)
+		return err
+	}
+	return nil
 }
 
 func (c *Client) Pause(chatID int64) (bool, error) {

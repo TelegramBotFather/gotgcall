@@ -384,7 +384,7 @@ func (c *Client) CreateCall(chatID int64) (string, error) {
 	}
 	unlock := c.acquireCreate(chatID)
 	defer unlock()
-	if _, exists := c.calls.Load(chatID); exists {
+	if c.callIsLive(chatID) {
 		return "", ErrConnectionExists
 	}
 	gc, err := instances.NewGroupCall(chatID, c.factory, c.disp, c.cfg.logger, c.cfg.connectTimeout, c.eventsFor(chatID))
@@ -415,12 +415,34 @@ func (c *Client) StartRTMP(chatID int64, rtmpURL string) error {
 	}
 	unlock := c.acquireCreate(chatID)
 	defer unlock()
-	if _, exists := c.calls.Load(chatID); exists {
+	if c.callIsLive(chatID) {
 		return ErrConnectionExists
 	}
 	rc := instances.NewRTMPCall(chatID, rtmpURL, c.disp, c.cfg.logger, c.eventsFor(chatID))
 	c.calls.Store(chatID, instances.Call(rc))
 	return nil
+}
+
+// callIsLive reports whether an existing call entry for chatID is still
+// usable. If the entry is in a terminal state (Failed / Closed) — for
+// example after pion declared ICE failed permanently or the previous
+// SetSource returned "connection closed during setup" — it is reaped
+// here so the caller can immediately create a fresh call instead of
+// being told ErrConnectionExists for a corpse. Callers hold the per-
+// chat create mutex via acquireCreate.
+func (c *Client) callIsLive(chatID int64) bool {
+	v, ok := c.calls.Load(chatID)
+	if !ok {
+		return false
+	}
+	prev := v.(instances.Call)
+	switch prev.NetState() {
+	case models.Failed, models.Closed:
+		c.calls.Delete(chatID)
+		_ = prev.Stop()
+		return false
+	}
+	return true
 }
 
 // --- Lifecycle: source control --------------------------------------------------

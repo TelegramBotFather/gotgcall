@@ -339,7 +339,7 @@ err = client.SetStreamSources(chatID, gotgcall.FromFile("song.mp3", gotgcall.Enc
 err = client.Stop(chatID)
 ```
 
-- `CreateCall` returns `ErrConnectionExists` if a call for that chat already exists. Per-chat creation mutex serialises concurrent calls so it never allocates twice.
+- `CreateCall` returns `ErrConnectionExists` only if a **live** call for that chat exists. If the previous call already reached `Failed` or `Closed` (e.g. ICE failed permanently behind symmetric NAT), it is reaped automatically and `CreateCall` returns a fresh handle — no explicit `Stop(chatID)` required between attempts. Per-chat creation mutex serialises concurrent calls so it never allocates twice.
 - `Connect` is idempotent only in the sense that re-calling it re-SetRemoteDescription's; if you call `Connect` before `CreateCall` you get `ErrConnectionNotFound`.
 - `Stop` removes the call from the internal map and clears the per-chat mutex; after `Stop` you can re-use the same `chatID` cleanly.
 - `client.AudioSSRC(chatID)` returns the audio SSRC for `phone.LeaveGroupCall`'s `Source` field. RTMP calls return `ErrWrongMode`.
@@ -429,7 +429,7 @@ All errors are sentinels — branch with `errors.Is`:
 
 | Error | Returned when |
 | --- | --- |
-| `ErrConnectionExists` | `CreateCall`/`StartRTMP` for a chatID that already has a live call. |
+| `ErrConnectionExists` | `CreateCall`/`StartRTMP` for a chatID that already has a **live** call (Failed/Closed calls are auto-reaped, so retries on a dead chat just work). |
 | `ErrConnectionNotFound` | Any method called with an unknown chatID, or after `Stop`. |
 | `ErrConnectionTimeout` | Declared for future use (currently surfaced via `OnConnectionChange(Failed)` after pion's 120 s ICE-failed timeout). |
 | `ErrConnectionFailed` | Same — declared for branching; current ICE-failed manifests as `OnConnectionChange(Failed)`. |

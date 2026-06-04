@@ -474,7 +474,7 @@ func (g *GroupCall) Resume() (bool, error) {
 	}
 	prev := g.currentStateLocked()
 	g.paused = false
-	// If streamers exist (gate-paused), just unblock them. Otherwise the
+	// If streamers exist (gate-paused), just unblock them. Otherwise, the
 	// source was never started (e.g. paused before SetStreamSources) — start now.
 	if g.audioStr != nil || g.videoStr != nil {
 		if g.audioStr != nil {

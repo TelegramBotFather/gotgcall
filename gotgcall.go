@@ -106,20 +106,22 @@ var (
 type Option func(*config)
 
 type config struct {
-	logger           *slog.Logger
-	ffmpegPath       string
-	iceServers       []ICEServer
-	networkTypes     []NetworkType
-	certPoolSize     int
-	dispatchBuf      int
-	connectTimeout   time.Duration
-	iceDisconnect    time.Duration
-	iceFailed        time.Duration
-	iceKeepalive     time.Duration
-	sharedUDPMux     bool
-	ffmpegStderrLog  bool
-	pionTraceAsDebug bool
-	logICECandidates bool
+	logger              *slog.Logger
+	ffmpegPath          string
+	iceServers          []ICEServer
+	networkTypes        []NetworkType
+	certPoolSize        int
+	dispatchBuf         int
+	connectTimeout      time.Duration
+	iceDisconnect       time.Duration
+	iceFailed           time.Duration
+	iceKeepalive        time.Duration
+	icePreConnectDelay  time.Duration
+	iceMaxBindingReqs   uint16
+	sharedUDPMux        bool
+	ffmpegStderrLog     bool
+	pionTraceAsDebug    bool
+	logICECandidates    bool
 }
 
 func defaultConfig() config {
@@ -237,6 +239,45 @@ func WithConnectTimeout(d time.Duration) Option {
 	}
 }
 
+// WithICEMaxBindingRequests overrides pion's per-pair STUN binding retry
+// budget. Library default is 150 (≈30 s of retries at the 200 ms check
+// interval), matching the standard connect gate so a slow Telegram SFU
+// registration still recovers within the gate window. Pion's own default
+// is 7, which lets each pair die in ~1.4 s if early STUN bindings get
+// error responses (common when the SFU hasn't yet bound our ICE
+// credentials post-JoinGroupCall) — pion then idle-ticks on a dead
+// checklist until the connect gate times out.
+//
+// Use this when you want a tighter or looser per-pair budget independent
+// of the connect gate. 0 keeps the library default.
+func WithICEMaxBindingRequests(n uint16) Option {
+	return func(c *config) {
+		if n > 0 {
+			c.iceMaxBindingReqs = n
+		}
+	}
+}
+
+// WithICEPreConnectDelay sleeps inside PeerConnection.Connect, after
+// parsing Telegram's remote params but before pion's SetRemoteDescription
+// kicks off ICE. Gives Telegram's SFU a head-start to register our
+// credentials so the first STUN binding succeeds instead of being
+// rejected with an error response (which would waste retries from the
+// ICEMaxBindingRequests budget).
+//
+// Default 0 (no delay). Pair with WithICEMaxBindingRequests for defense
+// in depth — the delay reduces wasted STUN traffic in the SFU
+// registration window; the higher binding budget recovers when the
+// delay alone wasn't long enough. Values in the 100-300 ms range are
+// imperceptible to users; longer delays just add latency to /play.
+func WithICEPreConnectDelay(d time.Duration) Option {
+	return func(c *config) {
+		if d > 0 {
+			c.icePreConnectDelay = d
+		}
+	}
+}
+
 // WithDebugLogs is a convenience that installs a Debug-level text handler
 // writing to os.Stderr. Equivalent to:
 //
@@ -331,16 +372,18 @@ func New(opts ...Option) (*Client, error) {
 	media.SetStderrLog(cfg.ffmpegStderrLog)
 
 	factory, err := wrtc.NewFactory(wrtc.FactoryOptions{
-		Logger:               cfg.logger,
-		SharedUDPMux:         cfg.sharedUDPMux,
-		CertPoolSize:         cfg.certPoolSize,
-		ICEServers:           cfg.iceServers,
-		NetworkTypes:         cfg.networkTypes,
-		ICEDisconnectTimeout: cfg.iceDisconnect,
-		ICEFailedTimeout:     cfg.iceFailed,
-		ICEKeepaliveInterval: cfg.iceKeepalive,
-		PionTraceAsDebug:     cfg.pionTraceAsDebug,
-		LogICECandidates:     cfg.logICECandidates,
+		Logger:                cfg.logger,
+		SharedUDPMux:          cfg.sharedUDPMux,
+		CertPoolSize:          cfg.certPoolSize,
+		ICEServers:            cfg.iceServers,
+		NetworkTypes:          cfg.networkTypes,
+		ICEDisconnectTimeout:  cfg.iceDisconnect,
+		ICEFailedTimeout:      cfg.iceFailed,
+		ICEKeepaliveInterval:  cfg.iceKeepalive,
+		ICEMaxBindingRequests: cfg.iceMaxBindingReqs,
+		ICEPreConnectDelay:    cfg.icePreConnectDelay,
+		PionTraceAsDebug:      cfg.pionTraceAsDebug,
+		LogICECandidates:      cfg.logICECandidates,
 	})
 	if err != nil {
 		return nil, err

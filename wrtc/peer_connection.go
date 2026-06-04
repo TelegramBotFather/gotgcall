@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sync"
+	"time"
 
 	"github.com/pion/webrtc/v4"
 
@@ -39,9 +40,10 @@ type PeerConnection struct {
 
 	onStateChangeMu sync.RWMutex
 
-	mu        sync.Mutex
-	audioSSRC uint32
-	videoSSRC uint32
+	mu           sync.Mutex
+	audioSSRC    uint32
+	videoSSRC    uint32
+	connectDelay time.Duration
 
 	closed bool
 }
@@ -127,15 +129,16 @@ func NewPeerConnection(f *Factory, log *slog.Logger) (*PeerConnection, error) {
 	}
 
 	peerConn := &PeerConnection{
-		pc:          pc,
-		audio:       audio,
-		video:       video,
-		audioSender: audioSender,
-		videoSender: videoSender,
-		monitor:     f.Monitor(),
-		audioSSRC:   audioSSRC,
-		videoSSRC:   videoSSRC,
-		log:         log,
+		pc:           pc,
+		audio:        audio,
+		video:        video,
+		audioSender:  audioSender,
+		videoSender:  videoSender,
+		monitor:      f.Monitor(),
+		audioSSRC:    audioSSRC,
+		videoSSRC:    videoSSRC,
+		connectDelay: f.ConnectDelay(),
+		log:          log,
 	}
 	// Register with the Factory-shared monitor. The monitor's tick loop
 	// skips PCs that aren't Connected, so we can register here (before
@@ -237,6 +240,19 @@ func (p *PeerConnection) Connect(remoteJSON string) error {
 		return fmt.Errorf("%w: synth answer: %v", models.ErrInvalidParams, err)
 	}
 	p.log.Debug("Connect: synthesized answer SDP", slog.String("sdp", answer))
+	// Optional pre-SetRemoteDescription pause. Telegram's SFU sometimes
+	// hasn't finished registering our ICE credentials by the time
+	// JoinGroupCall returns — pion then fires STUN bindings into a
+	// server that replies with error responses, wasting per-pair
+	// retries. A short sleep here lets the SFU catch up so the first
+	// binding succeeds. Opt-in via FactoryOptions.ICEPreConnectDelay;
+	// 0 (the default) preserves prior zero-latency behavior. The
+	// fallback safety net is ICEMaxBindingRequests (default 150),
+	// which keeps retrying through the connect gate regardless.
+	if p.connectDelay > 0 {
+		p.log.Debug("Connect: pre-ICE delay", slog.Duration("delay", p.connectDelay))
+		time.Sleep(p.connectDelay)
+	}
 	return p.pc.SetRemoteDescription(webrtc.SessionDescription{
 		Type: webrtc.SDPTypeAnswer,
 		SDP:  answer,

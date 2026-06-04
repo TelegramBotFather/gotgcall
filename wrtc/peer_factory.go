@@ -28,6 +28,7 @@ type Factory struct {
 	monitor          *FactoryMonitor
 	settings         webrtc.SettingEngine
 	iceServers       []webrtc.ICEServer
+	connectDelay     time.Duration
 	mu               sync.Mutex
 	closed           bool
 	logICECandidates bool
@@ -78,6 +79,18 @@ func (f *Factory) LogICECandidates() bool {
 	return f.logICECandidates
 }
 
+// ConnectDelay returns the pre-SetRemoteDescription delay applied inside
+// PeerConnection.Connect. Reduces wasted STUN binding requests when
+// Telegram's SFU takes a moment to register our ICE credentials after
+// the MTProto join — without it, pion fires 7+ rapid binding requests
+// into a server that replies with error responses, burning the per-pair
+// retry budget before the SFU is even ready. 0 = no delay.
+func (f *Factory) ConnectDelay() time.Duration {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.connectDelay
+}
+
 type FactoryOptions struct {
 	Logger *slog.Logger
 	// ICEServers overrides ICE server configuration. Default (nil) uses
@@ -98,7 +111,25 @@ type FactoryOptions struct {
 	ICEFailedTimeout time.Duration
 	// ICEKeepaliveInterval — STUN keepalive cadence. 0 = library default (2 s).
 	ICEKeepaliveInterval time.Duration
-	SharedUDPMux         bool
+	// ICEPreConnectDelay sleeps inside PeerConnection.Connect, after
+	// remote-params parsing but before SetRemoteDescription. Gives
+	// Telegram's SFU a head-start to register our credentials so the
+	// first STUN binding actually succeeds. Opt-in (default 0); pair
+	// with ICEMaxBindingRequests for defense in depth. Small values
+	// (100-300 ms) are imperceptible to users.
+	ICEPreConnectDelay time.Duration
+	// ICEMaxBindingRequests overrides pion's per-pair STUN binding retry
+	// budget. Pion's default is 7; combined with the 200 ms check interval
+	// that gives each pair only ~1.4 s before being permanently failed.
+	// Telegram's SFU often takes longer to register our ICE credentials
+	// post-JoinGroupCall and replies with STUN error responses in the
+	// meantime — pion treats those as failures and burns the whole budget
+	// in ~1.4 s, then sits idle until the 30 s connect gate fires. We
+	// default to 150 (≈30 s of retries at 200 ms), aligning per-pair
+	// retry with the connect gate so a slow SFU registration still recovers.
+	// 0 = library default (150).
+	ICEMaxBindingRequests uint16
+	SharedUDPMux          bool
 	// PionTraceAsDebug remaps pion's Trace level to slog.LevelDebug instead
 	// of LevelDebug-4. Surfaces ICE per-check / per-candidate / per-binding-
 	// request lines in any standard Debug-level handler — useful for
@@ -154,6 +185,19 @@ func NewFactory(opts FactoryOptions) (*Factory, error) {
 		keepalive = 2 * time.Second // unchanged — more-frequent keepalive helps NAT bindings
 	}
 	settings.SetICETimeouts(disconnect, failed, keepalive)
+	// Per-pair STUN binding retry budget. Pion's default (7) lets each
+	// candidate pair die in ~1.4 s (7 × 200 ms check interval) if early
+	// STUN bindings get error responses — common when Telegram's SFU
+	// hasn't finished registering our credentials post-JoinGroupCall.
+	// We default to 150 (≈30 s of retries), matching the standard
+	// connect gate so a slow registration still recovers within the
+	// gate window instead of leaving pion to idle-tick on a dead
+	// checklist until timeout.
+	maxBindReq := opts.ICEMaxBindingRequests
+	if maxBindReq == 0 {
+		maxBindReq = 150
+	}
+	settings.SetICEMaxBindingRequests(maxBindReq)
 	// Zero per-candidate-type acceptance windows so pion considers host
 	// and srflx candidates immediately — no stagger delay before the
 	// srflx (the only routable candidate behind NAT) gets used.
@@ -175,6 +219,7 @@ func NewFactory(opts FactoryOptions) (*Factory, error) {
 		certPool:         NewCertPool(opts.CertPoolSize, log),
 		monitor:          NewFactoryMonitor(log),
 		iceServers:       opts.ICEServers,
+		connectDelay:     opts.ICEPreConnectDelay,
 		logICECandidates: opts.LogICECandidates,
 	}
 	// Single goroutine drives keepalive + liveness for every PC this

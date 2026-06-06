@@ -503,12 +503,17 @@ func (c *Client) callIsLive(chatID int64) bool {
 // setup-phase API (CreateCall, Connect, SetStreamSources) when the call
 // returns an error so the caller doesn't need to remember to invoke Stop
 // separately. Safe if the entry is already gone (e.g. concurrent Stop).
+//
+// Intentionally does NOT touch createMu: a concurrent goroutine may be
+// parked on mu.Lock() from acquireCreate having already resolved the
+// pointer. Deleting the map entry would let the next acquireCreate
+// LoadOrStore a fresh mutex, and the two goroutines would then hold
+// different mutexes for the same chat and race inside CreateCall.
 func (c *Client) reap(chatID int64) {
 	v, ok := c.calls.LoadAndDelete(chatID)
 	if !ok {
 		return
 	}
-	c.createMu.Delete(chatID)
 	_ = v.(instances.Call).Stop()
 }
 
@@ -567,16 +572,17 @@ func (c *Client) Unmute(chatID int64) (bool, error) {
 	return call.Unmute()
 }
 
-// Stop tears down the call and clears every per-chat scrap of state the
-// library kept (call instance, create-mutex). After Stop the chatID can be
-// re-used cleanly.
+// Stop tears down the call and clears the per-chat call entry. The
+// per-chat create-mutex is intentionally kept (see reap) so a concurrent
+// CreateCall parked on mu.Lock() doesn't end up racing a later one on a
+// fresh mutex. The mutex memory is negligible (sizeof sync.Mutex per
+// chatID ever used).
 func (c *Client) Stop(chatID int64) error {
 	call, err := c.lookup(chatID)
 	if err != nil {
 		return err
 	}
 	c.calls.Delete(chatID)
-	c.createMu.Delete(chatID)
 	return call.Stop()
 }
 

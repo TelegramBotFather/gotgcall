@@ -265,16 +265,15 @@ func WithICEMaxBindingRequests(n uint16) Option {
 // rejected with an error response (which would waste retries from the
 // ICEMaxBindingRequests budget).
 //
-// Default 0 (no delay). Pair with WithICEMaxBindingRequests for defense
-// in depth — the delay reduces wasted STUN traffic in the SFU
-// registration window; the higher binding budget recovers when the
-// delay alone wasn't long enough. Values in the 100-300 ms range are
-// imperceptible to users; longer delays just add latency to /play.
+// Library default is 250 ms (imperceptible to users; covers typical SFU
+// registration windows around 150-200 ms post-JoinGroupCall). Pass any
+// negative duration to disable the delay entirely. Pair with
+// WithICEMaxBindingRequests for defense in depth — the delay reduces
+// wasted STUN traffic in the SFU registration window; the higher
+// binding budget recovers when the delay alone wasn't long enough.
 func WithICEPreConnectDelay(d time.Duration) Option {
 	return func(c *config) {
-		if d > 0 {
-			c.icePreConnectDelay = d
-		}
+		c.icePreConnectDelay = d
 	}
 }
 
@@ -325,6 +324,29 @@ func WithPionTraceLogs() Option {
 // candidate list (parsed in jsonparams) shows what Telegram returned.
 func WithICECandidateLogs() Option {
 	return func(c *config) { c.logICECandidates = true }
+}
+
+// WithVerboseConnectionLogs is a one-flag bundle for diagnosing
+// "ICE/DTLS did not reach Connected within Ns" failures. It enables:
+//   - Debug-level slog handler to stderr (WithDebugLogs)
+//   - Per-candidate gather logging (WithICECandidateLogs)
+//   - Pion's per-binding-request / per-pair-check trace at Debug
+//     (WithPionTraceLogs)
+//
+// Use when reporting a stuck-in-Connecting bug — the resulting log
+// contains every signal the library can surface about the ICE state
+// machine. Library still also emits an Info-level checking-phase
+// snapshot every ~5 seconds without this flag, so most issues can be
+// triaged from a non-Debug run; flip this when those Info lines aren't
+// enough.
+func WithVerboseConnectionLogs() Option {
+	return func(c *config) {
+		c.logger = slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
+			Level: slog.LevelDebug,
+		}))
+		c.logICECandidates = true
+		c.pionTraceAsDebug = true
+	}
 }
 
 // --- Client --------------------------------------------------------------------

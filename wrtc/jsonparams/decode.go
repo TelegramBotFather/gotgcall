@@ -51,12 +51,19 @@ func SynthesizeAnswerSDP(offerSDP string, rp *RemoteParams) (string, error) {
 		},
 	}
 
-	// No a=ice-lite: empirically some Telegram SFU instances act as full
-	// ICE and respond to pion's checks with 487 Role Conflict; declaring
-	// the remote lite forces pion into solo-controller mode and it can't
-	// renegotiate the role, so every check is rejected and the call is
-	// stuck in Checking. Let pion run full ICE with normal role
-	// negotiation — slower under "true lite" SFUs but works against both.
+	// Declare the remote (Telegram) as ICE-lite. Both ntgcalls and tgcalls
+	// model Telegram's SFU this way (libwebrtc SetRemoteIceMode(ICEMODE_LITE),
+	// ntgcalls group_connection.cpp:511-517, tgcalls GroupNetworkManager.cpp:378).
+	// In pion v4, remote-lite does NOT change our local ICE role (offerer +
+	// full ICE always lands on ICEROLE_CONTROLLING — see pion's role logic at
+	// peerconnection.go:1351-1358), but it does change pair-check pacing and
+	// how pion treats inbound bindings. The prior comment in this file
+	// blamed a=ice-lite for "stuck in Checking" / 487 Role Conflict storms;
+	// the real cause of those is that pion-as-offerer is ICE-CONTROLLING
+	// while Telegram is also CONTROLLING, and that conflict happens with or
+	// without a=ice-lite. The proper fix is a role swap (separate change);
+	// keeping a=ice-lite here aligns bookkeeping with the reference libs.
+	ans.Attributes = append(ans.Attributes, sdp.NewPropertyAttribute("ice-lite"))
 
 	// Copy session-level group attribute (BUNDLE).
 	for _, a := range off.Attributes {

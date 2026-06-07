@@ -258,24 +258,70 @@ func (e *pcMonitorEntry) checkLiveness() {
 	}
 }
 
+// logCheckingStats emits a single Info-level snapshot of the PC's state
+// every ~5 ticks while it is stuck in Connecting. Promoted from Debug
+// so users hitting "ICE/DTLS did not reach Connected within 30s" can
+// capture diagnostic logs without enabling Debug. The summary line shows
+// pion's state machine plus per-pair STUN traffic — a healthy connect
+// has ResponsesReceived climbing alongside RequestsSent and at least
+// one pair Nominated; a role conflict typically shows RequestsSent rising
+// with ResponsesReceived stuck near zero and no pair nominated.
 func (e *pcMonitorEntry) logCheckingStats() {
-	var pairs int
-	for _, s := range e.pc.GetStats() {
-		cp, ok := s.(webrtc.ICECandidatePairStats)
-		if !ok {
-			continue
+	stats := e.pc.GetStats()
+	var (
+		pairs               int
+		nominatedPairs      int
+		localCandidates     int
+		remoteCandidates    int
+		totalReqSent        uint64
+		totalRespRecv       uint64
+		totalReqRecv        uint64
+		totalRespSent       uint64
+	)
+	for _, s := range stats {
+		switch v := s.(type) {
+		case webrtc.ICECandidatePairStats:
+			pairs++
+			if v.Nominated {
+				nominatedPairs++
+			}
+			totalReqSent += uint64(v.RequestsSent)
+			totalRespRecv += uint64(v.ResponsesReceived)
+			totalReqRecv += uint64(v.RequestsReceived)
+			totalRespSent += uint64(v.ResponsesSent)
+			e.log.Info("ICE pair",
+				slog.String("state", string(v.State)),
+				slog.Bool("nominated", v.Nominated),
+				slog.Uint64("pktSent", uint64(v.PacketsSent)),
+				slog.Uint64("pktRecv", uint64(v.PacketsReceived)),
+				slog.Uint64("reqSent", uint64(v.RequestsSent)),
+				slog.Uint64("respRecv", uint64(v.ResponsesReceived)),
+				slog.Uint64("reqRecv", uint64(v.RequestsReceived)),
+				slog.Uint64("respSent", uint64(v.ResponsesSent)))
+		case webrtc.ICECandidateStats:
+			switch v.Type {
+			case webrtc.StatsTypeLocalCandidate:
+				localCandidates++
+			case webrtc.StatsTypeRemoteCandidate:
+				remoteCandidates++
+			}
 		}
-		pairs++
-		e.log.Debug("ICE pair",
-			slog.String("state", string(cp.State)),
-			slog.Bool("nominated", cp.Nominated),
-			slog.Uint64("pktSent", uint64(cp.PacketsSent)),
-			slog.Uint64("pktRecv", uint64(cp.PacketsReceived)),
-			slog.Uint64("reqSent", uint64(cp.RequestsSent)),
-			slog.Uint64("respRecv", uint64(cp.ResponsesReceived)))
 	}
+	e.log.Info("ICE checking-phase snapshot",
+		slog.String("pcState", e.pc.ConnectionState().String()),
+		slog.String("iceState", e.pc.ICEConnectionState().String()),
+		slog.String("iceGather", e.pc.ICEGatheringState().String()),
+		slog.String("signaling", e.pc.SignalingState().String()),
+		slog.Int("localCand", localCandidates),
+		slog.Int("remoteCand", remoteCandidates),
+		slog.Int("pairs", pairs),
+		slog.Int("nominated", nominatedPairs),
+		slog.Uint64("totalReqSent", totalReqSent),
+		slog.Uint64("totalRespRecv", totalRespRecv),
+		slog.Uint64("totalReqRecv", totalReqRecv),
+		slog.Uint64("totalRespSent", totalRespSent))
 	if pairs == 0 {
-		e.log.Debug("ICE: no candidate pairs formed yet")
+		e.log.Info("ICE: no candidate pairs formed yet — remote candidates may be missing or not yet applied")
 	}
 }
 

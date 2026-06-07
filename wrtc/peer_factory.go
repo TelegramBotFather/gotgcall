@@ -121,9 +121,11 @@ type FactoryOptions struct {
 	// ICEPreConnectDelay sleeps inside PeerConnection.Connect, after
 	// remote-params parsing but before SetRemoteDescription. Gives
 	// Telegram's SFU a head-start to register our credentials so the
-	// first STUN binding actually succeeds. Opt-in (default 0); pair
-	// with ICEMaxBindingRequests for defense in depth. Small values
-	// (100-300 ms) are imperceptible to users.
+	// first STUN binding actually succeeds. Library default is 250 ms
+	// when this field is left zero; pass any negative duration to
+	// disable the delay entirely. Pair with ICEMaxBindingRequests for
+	// defense in depth. Small values (100-300 ms) are imperceptible
+	// to users.
 	ICEPreConnectDelay time.Duration
 	// ICEMaxBindingRequests overrides pion's per-pair STUN binding retry
 	// budget. Pion's default is 7; combined with the 200 ms check interval
@@ -220,13 +222,30 @@ func NewFactory(opts FactoryOptions) (*Factory, error) {
 	settings.SetInterfaceFilter(makeInterfaceFilter())
 	settings.SetIPFilter(makeIPFilter())
 
+	// Default ICEPreConnectDelay: Telegram's SFU sometimes hasn't registered
+	// our ufrag/pwd by the time JoinGroupCall returns. Pion's first STUN
+	// binding then gets an auth-fail error response and that wasted check
+	// counts against the per-pair retry budget. A short pause here lets the
+	// SFU finish registration so the first binding succeeds. 250 ms is
+	// imperceptible to users and covers typical SFU registration windows
+	// (slow edges have been observed around 150-200 ms post-JoinGroupCall).
+	// Caller can opt back to 0 via FactoryOptions.ICEPreConnectDelay set to
+	// any negative value, which disables the default.
+	connectDelay := opts.ICEPreConnectDelay
+	switch {
+	case connectDelay < 0:
+		connectDelay = 0
+	case connectDelay == 0:
+		connectDelay = 250 * time.Millisecond
+	}
+
 	f := &Factory{
 		settings:         settings,
 		log:              log,
 		certPool:         NewCertPool(opts.CertPoolSize, log),
 		monitor:          NewFactoryMonitor(log),
 		iceServers:       opts.ICEServers,
-		connectDelay:     opts.ICEPreConnectDelay,
+		connectDelay:     connectDelay,
 		logICECandidates: opts.LogICECandidates,
 	}
 	// Single goroutine drives keepalive + liveness for every PC this

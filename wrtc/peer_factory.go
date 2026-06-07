@@ -51,8 +51,15 @@ func (f *Factory) Monitor() *FactoryMonitor {
 // Telegram's SFU receives STUN checks from an address it never saw
 // in our join payload and rejects every Binding request.
 var defaultSTUNServers = []webrtc.ICEServer{
+	// One per operator (different anycast networks → genuinely unique
+	// srflx candidates on symmetric NAT). Google primary is anycast and
+	// fast everywhere; the others give 3-operator redundancy if Google's
+	// anycast misbehaves locally. More Google entries don't add
+	// candidates because they all resolve to the same external mapping.
 	{URLs: []string{"stun:stun.l.google.com:19302"}},
 	{URLs: []string{"stun:stun1.l.google.com:19302"}},
+	{URLs: []string{"stun:stun.cloudflare.com:3478"}},
+	{URLs: []string{"stun:global.stun.twilio.com:3478"}},
 }
 
 // ICEServers returns the configured ICE server list. nil iceServers
@@ -340,19 +347,34 @@ func registerCodecs(m *webrtc.MediaEngine) error {
 		return err
 	}
 	// Video: VP8 PT 100 (Telegram standard).
+	videoFeedback := []webrtc.RTCPFeedback{
+		{Type: "goog-remb"},
+		{Type: "transport-cc"},
+		{Type: "ccm", Parameter: "fir"},
+		{Type: "nack"},
+		{Type: "nack", Parameter: "pli"},
+	}
 	if err := m.RegisterCodec(webrtc.RTPCodecParameters{
 		RTPCodecCapability: webrtc.RTPCodecCapability{
-			MimeType:  webrtc.MimeTypeVP8,
-			ClockRate: 90000,
-			RTCPFeedback: []webrtc.RTCPFeedback{
-				{Type: "goog-remb"},
-				{Type: "transport-cc"},
-				{Type: "ccm", Parameter: "fir"},
-				{Type: "nack"},
-				{Type: "nack", Parameter: "pli"},
-			},
+			MimeType:     webrtc.MimeTypeVP8,
+			ClockRate:    90000,
+			RTCPFeedback: videoFeedback,
 		},
 		PayloadType: models.VP8PayloadType,
+	}, webrtc.RTPCodecTypeVideo); err != nil {
+		return err
+	}
+	// Video: VP9 PT 102 (advertised as an alternative; Telegram negotiates
+	// VP8 in practice but advertising VP9 keeps SDP intersect non-empty if
+	// the SFU ever prefers VP9 on a particular edge).
+	if err := m.RegisterCodec(webrtc.RTPCodecParameters{
+		RTPCodecCapability: webrtc.RTPCodecCapability{
+			MimeType:     webrtc.MimeTypeVP9,
+			ClockRate:    90000,
+			SDPFmtpLine:  "profile-id=0",
+			RTCPFeedback: videoFeedback,
+		},
+		PayloadType: models.VP9PayloadType,
 	}, webrtc.RTPCodecTypeVideo); err != nil {
 		return err
 	}

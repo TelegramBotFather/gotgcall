@@ -24,11 +24,11 @@ const (
 	monitorPollInterval   = time.Second
 	// iceCheckingTimeout is the maximum time ICE may remain in Checking
 	// before the monitor force-closes the PC. Must exceed the default
-	// SetSource connection gate (30s) so the caller's own timeout fires
-	// first with a clean ErrNotConnected; this is purely a safety net
-	// for PCs that never get a SetSource call or where the caller
-	// ignores the error.
-	iceCheckingTimeout = 45 * time.Second
+	// SetSource connection gate (10s, matching ntgcalls) so the caller's
+	// own timeout fires first with a clean ErrNotConnected; this is
+	// purely a safety net for PCs that never get a SetSource call or
+	// where the caller ignores the error.
+	iceCheckingTimeout = 15 * time.Second
 	// newStateTimeout is the maximum time a PC may remain in New
 	// (Connect never called) before the monitor force-closes it.
 	newStateTimeout = 60 * time.Second

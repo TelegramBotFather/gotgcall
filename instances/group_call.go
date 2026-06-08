@@ -54,13 +54,14 @@ type GroupCall struct {
 }
 
 // NewGroupCall constructs a fresh call. Caller threads pion factory + logger.
-// connectTimeout controls how long SetSource waits for ICE+DTLS; 0 = 30s.
+// connectTimeout controls how long SetSource waits for ICE+DTLS; 0 = 10s
+// (matches ntgcalls' internal call_interface.cpp:138 timeout).
 func NewGroupCall(chatID int64, factory *wrtc.Factory, disp *utils.Dispatcher, log *slog.Logger, connectTimeout time.Duration, ev GroupCallEvents) (*GroupCall, error) {
 	if log == nil {
 		log = slog.New(slog.DiscardHandler)
 	}
 	if connectTimeout <= 0 {
-		connectTimeout = 30 * time.Second
+		connectTimeout = 10 * time.Second
 	}
 	pc, err := wrtc.NewPeerConnection(factory, log)
 	if err != nil {

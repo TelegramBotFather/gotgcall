@@ -212,6 +212,24 @@ func (p *PeerConnection) LocalParams() (string, error) {
 }
 
 // Connect finalizes the handshake using Telegram's response JSON.
+//
+// Internally pion is flipped from offerer to answerer so the ICE agent
+// runs in role CONTROLLED (matching ntgcalls / tgcalls; see decode.go
+// SynthesizeRemoteOfferSDP for the rationale). The sequence is:
+//
+//  1. We already created a local offer in LocalParams to gather candidates
+//     and produce credentials. Signaling state is HaveLocalOffer.
+//  2. Roll the local offer back so signaling state returns to Stable
+//     without touching the ICE agent — pion preserves ufrag/pwd across
+//     rollback (verified in pion/webrtc/v4@4.2.15 peerconnection.go:1034
+//     and icegatherer.go:583), which is critical because we already sent
+//     those credentials to Telegram in JoinGroupCall.
+//  3. Synthesize an offer-shaped SDP from Telegram's response and apply
+//     it as the remote description. weOffer becomes false at
+//     peerconnection.go:1225, role logic at :1351 lands on
+//     ICEROLE_CONTROLLED, and ICE checks start.
+//  4. CreateAnswer + SetLocalDescription to finalize. Pion's answer
+//     re-uses the same ufrag/pwd/fingerprint already announced to Telegram.
 func (p *PeerConnection) Connect(remoteJSON string) error {
 	rp, err := jsonparams.ParseRemote(remoteJSON)
 	if err != nil {
@@ -235,28 +253,41 @@ func (p *PeerConnection) Connect(remoteJSON string) error {
 			slog.String("proto", c.Protocol),
 			slog.String("type", c.Type))
 	}
-	answer, err := jsonparams.SynthesizeAnswerSDP(local.SDP, rp)
+	offerSDP, err := jsonparams.SynthesizeRemoteOfferSDP(local.SDP, rp)
 	if err != nil {
-		return fmt.Errorf("%w: synth answer: %v", models.ErrInvalidParams, err)
+		return fmt.Errorf("%w: synth remote offer: %v", models.ErrInvalidParams, err)
 	}
-	p.log.Debug("Connect: synthesized answer SDP", slog.String("sdp", answer))
-	// Optional pre-SetRemoteDescription pause. Telegram's SFU sometimes
-	// hasn't finished registering our ICE credentials by the time
-	// JoinGroupCall returns — pion then fires STUN bindings into a
-	// server that replies with error responses, wasting per-pair
-	// retries. A short sleep here lets the SFU catch up so the first
-	// binding succeeds. Opt-in via FactoryOptions.ICEPreConnectDelay;
-	// 0 (the default) preserves prior zero-latency behavior. The
-	// fallback safety net is ICEMaxBindingRequests (default 150),
-	// which keeps retrying through the connect gate regardless.
+	p.log.Debug("Connect: synthesized remote offer SDP", slog.String("sdp", offerSDP))
+	// Optional pause before applying the remote offer. Telegram's SFU
+	// sometimes hasn't registered our ufrag/pwd by the time JoinGroupCall
+	// returns; if pion's first STUN binding goes out before that finishes
+	// the SFU rejects it (and we burn a per-pair retry slot). A short
+	// sleep lets the SFU catch up so the first binding succeeds.
 	if p.connectDelay > 0 {
 		p.log.Debug("Connect: pre-ICE delay", slog.Duration("delay", p.connectDelay))
 		time.Sleep(p.connectDelay)
 	}
-	return p.pc.SetRemoteDescription(webrtc.SessionDescription{
-		Type: webrtc.SDPTypeAnswer,
-		SDP:  answer,
-	})
+	// Step 2: rollback to Stable so we can apply the offer as remote.
+	if err = p.pc.SetLocalDescription(webrtc.SessionDescription{Type: webrtc.SDPTypeRollback}); err != nil {
+		return fmt.Errorf("%w: rollback local offer: %v", models.ErrInternal, err)
+	}
+	// Step 3: apply Telegram's params as a remote offer. Pion's
+	// startTransports runs with iceRole=ICEROLE_CONTROLLED.
+	if err = p.pc.SetRemoteDescription(webrtc.SessionDescription{
+		Type: webrtc.SDPTypeOffer,
+		SDP:  offerSDP,
+	}); err != nil {
+		return fmt.Errorf("%w: set remote offer: %v", models.ErrInvalidParams, err)
+	}
+	// Step 4: generate and set our answer.
+	answer, err := p.pc.CreateAnswer(nil)
+	if err != nil {
+		return fmt.Errorf("%w: create answer: %v", models.ErrInternal, err)
+	}
+	if err = p.pc.SetLocalDescription(answer); err != nil {
+		return fmt.Errorf("%w: set local answer: %v", models.ErrInternal, err)
+	}
+	return nil
 }
 
 func (p *PeerConnection) AudioSSRC() uint32                          { return p.audioSSRC }

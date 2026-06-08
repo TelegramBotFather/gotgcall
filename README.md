@@ -245,8 +245,7 @@ gotgcall.New(
     gotgcall.WithSharedUDPMux(),                        // one UDP socket for all calls
     gotgcall.WithDTLSCertPool(16),                      // pre-generate N DTLS certs
     gotgcall.WithDispatchBuffer(512),                   // event-dispatcher queue size
-    gotgcall.WithICEServers([]gotgcall.ICEServer{       // STUN + TURN
-        {URLs: []string{"stun:stun.l.google.com:19302"}},
+    gotgcall.WithICEServers([]gotgcall.ICEServer{       // optional TURN (no STUN needed by default)
         {URLs: []string{"turn:turn.example.com:3478"},
          Username: "u", Credential: "p"},
     }),
@@ -262,38 +261,38 @@ gotgcall.New(
 | Option | Default | Notes |
 | --- | --- | --- |
 | `WithFFmpegPath` | `"ffmpeg"` | `New()` fails fast with `exec.LookPath` if the binary is missing. |
-| `WithLogger` | discard | Plumbed into the WebRTC factory, the media package (ffmpeg stderr/exit), the dispatcher, **and pion's internal ICE/DTLS/SCTP logs** via the slog bridge in `wrtc/pion_logger.go`. |
+| `WithLogger` | discard | Receives everything: gotgcall events, ffmpeg stderr/exit, dispatcher, and pion's internal ICE/DTLS/SCTP logs (each tagged with `pion=<scope>`). |
 | `WithDebugLogs` | off | Convenience shortcut that installs a `slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug})`. Use when reporting bugs. |
 | `WithFFmpegStderrLog` | off | Tees ffmpeg stderr line-by-line into the logger at Debug level. Without this, stderr is only surfaced in the final error message (last 512 bytes) when ffmpeg crashes — useless for "stream runs but I hear nothing" symptoms. |
 | `WithSharedUDPMux` | off | Opens **one** `udp4:0` socket and routes ICE for every call through it. See [UDP mux scaling](#udp-mux--scaling) below. |
 | `WithDTLSCertPool` | 8 | Background goroutine keeps N pre-generated ECDSA-P256 certs ready so `CreateCall` doesn't stall on keygen during bursts. 0 = disabled. |
 | `WithDispatchBuffer` | 256 | Size of the single callback-dispatcher channel. Larger absorbs bursts of state changes before the consumer drains. |
-| `WithICEServers` | 2× Google STUN | Overrides the default STUN list. Add TURN entries for users behind symmetric NAT / restrictive firewalls. Pass an empty slice to disable STUN entirely (host-only candidates). |
+| `WithICEServers` | (none) | gotgcall ships no default STUN — pion gathers host candidates only and Telegram's SFU peer-reflexively learns our post-NAT source (matches ntgcalls). Set this when the network blocks UDP host-to-host and you need TURN, or when you want srflx for diagnostic reasons. |
 | `WithNetworkTypes` | UDP4+UDP6 | Override the ICE candidate network-type whitelist. Add TCP for restrictive environments where UDP is blocked. |
-| `WithICETimeouts` | 60 s / 120 s / 2 s | `(disconnect, failed, keepalive)`. Generous defaults because Telegram's edge wobble on rejoin frequently takes 60-90 s to settle on a working candidate pair. Pass `0` for any value to keep the default; ultra-responsive UIs can shorten back to 30/60. |
+| `WithICETimeouts` | 60 s / 120 s / 2 s | `(disconnect, failed, keepalive)`. Pass `0` for any value to keep the default; shorten for ultra-responsive UIs, lengthen for unstable networks. |
+| `WithConnectTimeout` | 10 s | How long `SetSource` / `Resume` wait for ICE+DTLS to settle before returning `ErrNotConnected`. Matches ntgcalls' own internal timeout. |
+| `WithICEPreConnectDelay` | 250 ms | Short pause inside `Connect` so Telegram's SFU has registered our credentials before pion's first STUN binding goes out. Negative value disables. |
+| `WithVerboseConnectionLogs` | off | One-flag bundle: Debug-level slog + per-candidate logs + pion trace. Use when reporting a stuck-in-Connecting bug. |
 
 ### Enabling debug logs
 
-If you've heard "I set WithLogger but I see nothing" — **before** the slog bridge below was added, pion's internal logs (ICE state, DTLS handshake, SCTP) went straight to stderr via the `log` package, completely bypassing `WithLogger`. That is now fixed: the bridge wraps every pion logger into your slog handler, tagged with `pion=<scope>` (e.g. `pion=ice`, `pion=dtls`).
-
-The fastest way to see everything:
+For maximum verbosity when reporting a bug:
 
 ```go
 client, err := gotgcall.New(
-    gotgcall.WithDebugLogs(),
-    gotgcall.WithFFmpegStderrLog(),
+    gotgcall.WithVerboseConnectionLogs(), // ICE + DTLS + per-candidate trace
+    gotgcall.WithFFmpegStderrLog(),       // ffmpeg stderr line-by-line
 )
 ```
 
-With both on, you get: gotgcall internals (Debug), pion ICE/DTLS/SCTP/interceptor (Debug+), ffmpeg stderr lines (Debug). Filter by attribute key if it's too much:
+Pion's internal lines come in tagged with `pion=<scope>` (e.g. `pion=ice`, `pion=dtls`); filter by attribute if it's too much:
 
 ```go
 slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
     Level: slog.LevelDebug,
     ReplaceAttr: func(_ []string, a slog.Attr) slog.Attr {
-        // example: drop pion=interceptor lines
         if a.Key == "pion" && a.Value.String() == "interceptor" {
-            return slog.Attr{}
+            return slog.Attr{} // drop interceptor noise
         }
         return a
     },
@@ -453,50 +452,32 @@ All errors are sentinels — branch with `errors.Is`:
 
 ## Networking
 
-**Transport.** Pion v4 is the only WebRTC stack. Full ICE on both sides with default STUN on (see below) so NAT'd deployments — Docker, cloud VMs without a bound public IP — gather a server-reflexive candidate; without it Telegram's SFU rejects every connectivity check because the post-NAT source address never appears in our join payload. UDP4+UDP6 enabled by default (matching ntgcalls' `PORTALLOCATOR_ENABLE_IPV6`). DTLS role is passive/server (the answer SDP carries `setup=active` so pion, as the offerer, derives passive/server for itself — matching ntgcalls' `SSL_SERVER`).
+- **Transport:** UDP4 + UDP6 by default. Override with `WithNetworkTypes(...)` to restrict or add TCP.
+- **STUN / TURN:** none by default — host candidates work for the great majority of deployments. Pass `WithICEServers(...)` if you need TURN for symmetric NAT / blocked UDP.
+- **Interface filter:** virtual / VPN interfaces (Docker bridges, WSL, VMware, Tailscale, ZeroTier, OpenVPN, etc.) are skipped automatically. Override is not exposed; report a bug if your interface name is being filtered incorrectly.
+- **UDP mux:** default = one socket per call. Pass `WithSharedUDPMux()` to multiplex all calls through one `udp4:0` socket (useful at 100+ concurrent calls).
+- **Connect gate:** `SetSource` waits up to 10 s for ICE + DTLS to reach Connected before returning `ErrNotConnected`. Override with `WithConnectTimeout(...)`.
+- **ICE timeouts:** 60 s disconnect grace, 120 s before declaring failed, 2 s keepalive. Override with `WithICETimeouts(...)`.
 
-**Interface filter.** Virtual / VPN interfaces are skipped by name match: `vethernet`, `vmware`, `virtualbox`, `vbox`, `hyper-v`, `loopback`, `teredo`, `isatap`, `tap-`, `docker`, `wsl`, `tailscale`, `zerotier`, `openvpn`. Gathering candidates on these would slow ICE and produce unreachable pairs.
+## Performance tuning
 
-**STUN.** Two Google STUN servers are configured by default so pion can gather server-reflexive candidates behind NAT. Override with `WithICEServers`; pass an empty slice to disable STUN entirely (host-only candidates — fine when the bot has a public IP). TURN is not configured by default; pass `WithICEServers` with TURN entries for users behind symmetric NAT or restrictive firewalls.
-
-**No ice-lite in the answer.** The synthesized answer does **not** carry `a=ice-lite`. Earlier versions declared the remote as lite to skip pion's "wait for reverse checks" path, but in practice some Telegram SFU instances act as full ICE and respond with `487 Role Conflict` to our checks — declaring lite forces pion into solo-controller mode and it can't renegotiate the role, so every check is rejected and the call stalls in `Checking`. Letting pion run full ICE with normal role negotiation works for both lite and full SFU instances.
-
-**ICE timeouts.** Disconnect grace = 60 s, failed declaration = 120 s, keepalive = 2 s. Generous defaults because Telegram's edge wobble on rejoin takes 60-90 s to settle on a working candidate pair. Override via `WithICETimeouts` for ultra-responsive UIs (shorter) or extra-unstable networks (longer). Pion surfaces failure via `OnConnectionStateChange(Failed)`. On top of the pion timers the `FactoryMonitor` runs a **30 s checking-stuck safety net**: if a PC stays in `Connecting` for more than 30 s the monitor force-closes it. This is a last resort — the `SetSource` connection gate (15 s) fires first with a clean `ErrNotConnected` for normal use.
-
-**UDP mux.** Default behavior: each call binds its own UDP socket. Enable `WithSharedUDPMux()` to route every call through one shared `udp4:0` socket. Useful at 100+ concurrent calls where you don't want N ephemeral ports open.
-
-**RTP header extensions.** The full Telegram-required set is registered: `ssrc-audio-level` (RFC 6464), `abs-send-time`, `transport-cc`, `sdes-mid`, `video-orientation`. The library auto-stamps `ssrc-audio-level` (`-20 dBov`, voice-activity bit set) and `abs-send-time` on every outbound audio packet via a pion interceptor — Telegram's SFU silently drops streams that don't carry audio-level (it treats them as silence and stops forwarding to listeners).
-
-**Outbound RTP marker bit.** Pion's packetizer sets `marker=true` on every single-payload Opus packet, but per RFC 7587 the marker should only be set on the first packet after silence. An always-set marker forces jitter-buffer resync at the SFU and degrades audio. We clear it via a small interceptor on outbound audio.
-
-**Pion log noise filter.** Telegram's mixer forwards every other participant's RTP to us; our PeerConnection has only send-only tracks, so pion logs `Simulcast probing failed` for each unknown incoming SSRC. We filter these out at the `Error` level so they don't bury real errors. Other levels pass through.
-
-**HLS / HTTP.** ffmpeg-side, not pion-side. See [`FromFile` / `FromURL`](#fromfile--fromurl) for the auto-injected reconnect / timeout flags.
-
-## Performance notes
-
-- **Cert pool.** ECDSA-P256 keygen is ~10ms per call. The cert pool keeps `N` ready so burst joins don't queue behind keygen latency. Defaults to 8; raise for very bursty workloads.
-- **Single dispatcher.** All callbacks serialise on one goroutine. Tune `WithDispatchBuffer` if you see drop warnings.
-- **Single timer per streamer.** The pacing loop reuses one `time.Timer` for the whole stream rather than allocating a `NewTimer` per sample (Go 1.23+ Reset semantics make this safe without manual drain).
-- **OS-pipe-managed stdout.** ShellReader uses `os.Pipe` rather than `cmd.StdoutPipe` so `cmd.Wait` doesn't close the read end out from under us. Without this, the last chunk of audio buffered in the kernel pipe would be discarded the moment ffmpeg exits.
-- **Per-page OGG flush.** `-page_duration 20000` on `libopus` forces ffmpeg to emit one OGG page per Opus frame. The default (1s) would batch ~50 frames per page and the frame-per-page reader would consume the song at ~50× real-time.
-- **Fast-probe flags.** `-analyzeduration 0 -probesize 64k` on local files cuts ~1-2s of startup latency (default is 5s + 5MB).
+- **Cert pool size** (`WithDTLSCertPool`): default 8; raise for very bursty workloads. ECDSA-P256 keygen costs ~10 ms per call — the pool keeps a buffer ready so `CreateCall` doesn't block on it.
+- **Dispatch buffer** (`WithDispatchBuffer`): default 256. Raise if you see drop warnings under bursty callback fan-out.
+- **Shared UDP mux** (`WithSharedUDPMux`): collapses every call onto one socket. Use at 100+ concurrent calls.
+- **Fast cold-start:** `FromFile` / `FromURL` already inject `-analyzeduration 0 -probesize 64k`, cutting ~1–2 s from ffmpeg startup. If you go custom via `FromShell`, set the same flags.
 
 ## A/V sync
 
-- **RTP timestamps + RTCP Sender Reports** are what synchronise audio and video at the receiver. Pion's default interceptors send SR automatically; the receiver maps RTP timestamps to NTP via the SR.
-- **Both streamers are started in the same `startLocked` call** (`instances/group_call.go`), so their wall-clock baselines are within microseconds of each other.
-- **Each streamer paces by `sample.Duration`** (audio = 20 ms per Opus frame, video = `1/fps` per VP8 frame) using a single hoisted timer. Real-time accuracy is sub-millisecond; no drift accumulates over time.
-- **Don't apply different time-distortion filters to the audio and video legs of one source** — e.g., `atempo=1.25` on audio without `setpts=PTS/1.25` on video. The two will desync linearly at 25 % per minute.
-- For RTMP mode (single ffmpeg push) sync is ffmpeg's responsibility — typically not a concern for properly-muxed source files.
+- Audio and video legs share a wall-clock baseline within microseconds and pace by per-frame duration; drift does not accumulate.
+- **Don't apply different time-distortion filters to the two legs** — e.g. `atempo=1.25` on audio without `setpts=PTS/1.25` on video — they will desync linearly.
+- In RTMP mode, sync is ffmpeg's responsibility (single muxed push).
 
 ## Pitfalls
 
-- **Requesting video on an audio-only source fails the call.** The library opens two ffmpeg subprocesses for `Tracks: TrackVideo`. If the source has no video stream, ffmpeg's `-map 0:v?` makes the video leg exit cleanly (no stream), the OGG/IVF parser sees EOF, and the video track is silently skipped — but if audio also fails, you get `ErrFile`. Don't request video tracks unless you know the container has them.
-- **Don't switch ffmpeg output back to PCM.** It will "work" but defeats the design — you'd be re-encoding in Go (which would require cgo, the very thing this library exists to avoid).
-- **Raw PCM/YUV is rejected at construction time.** `FromShell` validates the codec/container args and returns `ErrInvalidParams` with a useful hint pointing at `libopus`/`libvpx`.
-- **`SetSource` gates on ICE Connected** (15 s timeout). ffmpeg is spawned and OGG/IVF headers are parsed outside the lock, but `WriteSample` only begins after ICE+DTLS completes — samples written before SRTP binding are silently dropped by pion. If ICE fails or the call is stopped during the wait, `SetSource` returns `ErrNotConnected` / `ErrConnectionFailed`.
-- **Pause in RTMP mode is destructive to the connection.** ffmpeg is killed; Telegram drops the RTMP ingest. Resume re-establishes from `elapsed_ms`. Listeners will see a brief silence.
+- **Requesting video on an audio-only source.** Don't pass `Tracks: TrackVideo` unless you know the container actually has video; audio failure alongside an empty video leg surfaces as `ErrFile`.
+- **Raw PCM/YUV is rejected at construction time.** `FromShell` validates codec/container args and returns `ErrInvalidParams` pointing at `libopus`/`libvpx`.
+- **`SetSource` gates on ICE Connected** (10 s default). Samples written before ICE+DTLS settle are silently dropped; the gate blocks the caller until it's safe to push frames. On failure, `ErrNotConnected` / `ErrConnectionFailed`.
+- **Pause in RTMP mode is destructive.** ffmpeg is killed and Telegram drops the ingest; resume re-establishes at the captured offset. Listeners hear a brief silence.
 
 ## Performance vs ntgcalls
 

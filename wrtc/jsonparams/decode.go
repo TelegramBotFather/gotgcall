@@ -25,17 +25,29 @@ func ParseRemote(raw string) (*RemoteParams, error) {
 	return rp, nil
 }
 
-// SynthesizeAnswerSDP builds an SDP answer from Telegram's remote params,
-// reusing the codec/extension/mid layout from our own offer SDP. The
-// answer's transport-level info (ufrag, pwd, fingerprint, candidates) is
-// substituted with Telegram's values.
-func SynthesizeAnswerSDP(offerSDP string, rp *RemoteParams) (string, error) {
+// SynthesizeRemoteOfferSDP builds an OFFER-shaped SDP from Telegram's
+// response so the caller can feed it to pion as the remote description.
+// The offer-shape (vs answer-shape, which we used pre-v0.6.26) flips pion
+// into the ICE answerer role — pion's role logic at peerconnection.go:1351
+// only assigns ICEROLE_CONTROLLING when `weOffer && !ICELite`; when we
+// rollback our local offer and SetRemoteDescription(offer) instead, weOffer
+// becomes false and pion ends up ICEROLE_CONTROLLED. That matches what
+// ntgcalls (group_connection.cpp:511-513) and tgcalls (GroupNetworkManager
+// .cpp:376-378) do, and avoids the STUN 487 Role Conflict storm that pion
+// can't recover from (pion v4.2.7 silently drops ClassErrorResponse at
+// agent.go:1701, so the role-conflict flip never executes — see the v0.6.25
+// diagnostic logs).
+//
+// Codec/extension/mid layout is mirrored from our offer so pion's answer
+// keeps the same transceiver/SSRC binding it negotiated when we generated
+// our credentials.
+func SynthesizeRemoteOfferSDP(offerSDP string, rp *RemoteParams) (string, error) {
 	var off sdp.SessionDescription
 	if err := off.UnmarshalString(offerSDP); err != nil {
 		return "", fmt.Errorf("parse offer: %w", err)
 	}
 
-	ans := &sdp.SessionDescription{
+	syn := &sdp.SessionDescription{
 		Version: 0,
 		Origin: sdp.Origin{
 			Username:       "-",
@@ -51,42 +63,37 @@ func SynthesizeAnswerSDP(offerSDP string, rp *RemoteParams) (string, error) {
 		},
 	}
 
-	// Declare the remote (Telegram) as ICE-lite. Both ntgcalls and tgcalls
-	// model Telegram's SFU this way (libwebrtc SetRemoteIceMode(ICEMODE_LITE),
-	// ntgcalls group_connection.cpp:511-517, tgcalls GroupNetworkManager.cpp:378).
-	// In pion v4, remote-lite does NOT change our local ICE role (offerer +
-	// full ICE always lands on ICEROLE_CONTROLLING — see pion's role logic at
-	// peerconnection.go:1351-1358), but it does change pair-check pacing and
-	// how pion treats inbound bindings. The prior comment in this file
-	// blamed a=ice-lite for "stuck in Checking" / 487 Role Conflict storms;
-	// the real cause of those is that pion-as-offerer is ICE-CONTROLLING
-	// while Telegram is also CONTROLLING, and that conflict happens with or
-	// without a=ice-lite. The proper fix is a role swap (separate change);
-	// keeping a=ice-lite here aligns bookkeeping with the reference libs.
-	ans.Attributes = append(ans.Attributes, sdp.NewPropertyAttribute("ice-lite"))
+	// No a=ice-lite at session level: we WANT pion's role logic to land
+	// on ICEROLE_CONTROLLED (i.e. answerer + remote!=lite). Adding ice-lite
+	// here would flip pion back to controlling and reintroduce the 487
+	// role-conflict storm we just fixed.
 
-	// Copy session-level group attribute (BUNDLE).
 	for _, a := range off.Attributes {
 		if a.Key == "group" || a.Key == "msid-semantic" {
-			ans.Attributes = append(ans.Attributes, a)
+			syn.Attributes = append(syn.Attributes, a)
 		}
 	}
 
 	for _, om := range off.MediaDescriptions {
-		am := mirrorMediaSection(om, rp)
-		ans.MediaDescriptions = append(ans.MediaDescriptions, am)
+		syn.MediaDescriptions = append(syn.MediaDescriptions, mirrorMediaSectionAsOffer(om, rp))
 	}
 
-	b, err := ans.Marshal()
+	b, err := syn.Marshal()
 	if err != nil {
 		return "", err
 	}
 	return string(b), nil
 }
 
-// mirrorMediaSection builds an answer m-section that mirrors the offer's
-// codec/extension/mid set but substitutes Telegram's transport info.
-func mirrorMediaSection(om *sdp.MediaDescription, rp *RemoteParams) *sdp.MediaDescription {
+// mirrorMediaSectionAsOffer builds an m-section that LOOKS like Telegram
+// offered it: codec/extension/mid set carried over from our original
+// offer, but transport-level info (ufrag, pwd, fingerprint, candidates)
+// substituted with Telegram's values, DTLS direction set to actpass
+// (offer default — pion's CreateAnswer will pick passive so we end up the
+// DTLS server, matching ntgcalls' SSL_SERVER), and direction set to
+// recvonly so pion answers with sendonly (we send, Telegram receives —
+// matching the actual data flow of a music bot).
+func mirrorMediaSectionAsOffer(om *sdp.MediaDescription, rp *RemoteParams) *sdp.MediaDescription {
 	am := &sdp.MediaDescription{
 		MediaName: sdp.MediaName{
 			Media:   om.MediaName.Media,
@@ -101,7 +108,6 @@ func mirrorMediaSection(om *sdp.MediaDescription, rp *RemoteParams) *sdp.MediaDe
 		},
 	}
 
-	// Transport: substitute Telegram's values.
 	am.Attributes = append(am.Attributes,
 		sdp.NewAttribute("rtcp", "9 IN IP4 0.0.0.0"),
 		sdp.NewAttribute("ice-ufrag", rp.Transport.Ufrag),
@@ -113,22 +119,21 @@ func mirrorMediaSection(om *sdp.MediaDescription, rp *RemoteParams) *sdp.MediaDe
 			sdp.NewAttribute("fingerprint", fp.Hash+" "+fp.Fingerprint),
 		)
 	}
-	// DTLS role: setup=active in the answer makes pion (the offerer) the
-	// DTLS server, Telegram the client. Hardcoded — Telegram's fp.Setup
-	// often echoes our own "passive" and forwarding it deadlocks DTLS.
-	// Matches ntgcalls' GroupConnection (which ignores the response setup).
-	am.Attributes = append(am.Attributes, sdp.NewAttribute("setup", "active"))
+	// DTLS role: setup=actpass is the offer default. Pion's CreateAnswer
+	// picks setup=passive (so pion = DTLS server, matching ntgcalls'
+	// SSL_SERVER). Telegram then sends ClientHello as DTLS-active.
+	am.Attributes = append(am.Attributes, sdp.NewAttribute("setup", "actpass"))
 
-	// mid, rtcp-mux, direction (recvonly since we're send-only).
 	for _, a := range om.Attributes {
 		switch a.Key {
 		case "mid", "rtcp-mux", "rtcp-rsize":
 			am.Attributes = append(am.Attributes, a)
 		}
 	}
+	// recvonly from the (synthetic) offerer's POV — Telegram only receives;
+	// pion's answer mirrors as sendonly, which matches our music-bot flow.
 	am.Attributes = append(am.Attributes, sdp.NewPropertyAttribute("recvonly"))
 
-	// Carry codec set across unchanged (rtpmap/fmtp/rtcp-fb/extmap).
 	for _, a := range om.Attributes {
 		switch a.Key {
 		case "rtpmap", "fmtp", "rtcp-fb", "extmap":
@@ -136,8 +141,6 @@ func mirrorMediaSection(om *sdp.MediaDescription, rp *RemoteParams) *sdp.MediaDe
 		}
 	}
 
-	// ICE candidates from Telegram — pass through both IPv4 and IPv6; pion
-	// will pair against whatever the local network can actually reach.
 	for _, c := range rp.Transport.Candidates {
 		am.Attributes = append(am.Attributes, sdp.NewAttribute("candidate", candidateToSDP(c)))
 	}
@@ -147,8 +150,6 @@ func mirrorMediaSection(om *sdp.MediaDescription, rp *RemoteParams) *sdp.MediaDe
 }
 
 func candidateToSDP(c Candidate) string {
-	// SDP candidate line format:
-	// <foundation> <component> <transport> <priority> <ip> <port> typ <type> [raddr <ip> rport <port>] [generation <n>] [network-id <n>]
 	var b strings.Builder
 	b.WriteString(c.Foundation)
 	b.WriteByte(' ')
@@ -187,4 +188,3 @@ func candidateToSDP(c Candidate) string {
 	}
 	return b.String()
 }
-

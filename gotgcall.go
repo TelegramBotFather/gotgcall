@@ -227,10 +227,11 @@ func WithICETimeouts(disconnect, failed, keepalive time.Duration) Option {
 }
 
 // WithConnectTimeout overrides how long SetSource/Resume wait for the WebRTC
-// connection to reach Connected before giving up. Default 30s. Telegram's SFU
-// sometimes needs 15-25s to complete ICE+DTLS on busy edges or cross-DC
-// rejoins; the previous 15s hard-limit caused spurious failures. Set higher
-// on unstable networks; set lower for responsive UIs that prefer fast failure.
+// connection to reach Connected before giving up. Default 10s — matches
+// ntgcalls' own internal connection timeout. With pion running as
+// ICE-CONTROLLED (since v0.6.26) and Telegram's edges responding within
+// 50-300ms in healthy networks, 10s is generous. Set higher on
+// unstable networks where ICE re-pairing on cross-DC moves takes longer.
 func WithConnectTimeout(d time.Duration) Option {
 	return func(c *config) {
 		if d > 0 {

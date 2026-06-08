@@ -44,37 +44,20 @@ func (f *Factory) Monitor() *FactoryMonitor {
 	return f.monitor
 }
 
-// defaultSTUNServers provides server-reflexive candidates for bots
-// behind NAT (Docker, cloud VMs without bound public IPs, symmetric
-// home routers). Host-only candidates work when the process has a
-// direct public IP, but anything NAT'd needs srflx — otherwise
-// Telegram's SFU receives STUN checks from an address it never saw
-// in our join payload and rejects every Binding request.
-var defaultSTUNServers = []webrtc.ICEServer{
-	// One per operator (different anycast networks → genuinely unique
-	// srflx candidates on symmetric NAT). Google primary is anycast and
-	// fast everywhere; the others give 3-operator redundancy if Google's
-	// anycast misbehaves locally. More Google entries don't add
-	// candidates because they all resolve to the same external mapping.
-	{URLs: []string{"stun:stun.l.google.com:19302"}},
-	{URLs: []string{"stun:stun1.l.google.com:19302"}},
-	{URLs: []string{"stun:stun.cloudflare.com:3478"}},
-	{URLs: []string{"stun:global.stun.twilio.com:3478"}},
-}
-
-// ICEServers returns the configured ICE server list. nil iceServers
-// means "use defaults" (Google STUN); a non-nil empty slice means the
-// caller explicitly disabled STUN.
+// ICEServers returns the configured ICE server list. Default (nil) is
+// no STUN/TURN — pion gathers only host candidates and Telegram's SFU
+// peer-reflexively learns our post-NAT source on the first inbound
+// binding it receives from us. Matches ntgcalls' empty STUN list
+// (group_connection.cpp:523-525). Pass TURN entries for restrictive
+// networks that block UDP host-to-host.
 func (f *Factory) ICEServers() []webrtc.ICEServer {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if f.iceServers != nil {
-		out := make([]webrtc.ICEServer, len(f.iceServers))
-		copy(out, f.iceServers)
-		return out
+	if len(f.iceServers) == 0 {
+		return nil
 	}
-	out := make([]webrtc.ICEServer, len(defaultSTUNServers))
-	copy(out, defaultSTUNServers)
+	out := make([]webrtc.ICEServer, len(f.iceServers))
+	copy(out, f.iceServers)
 	return out
 }
 
@@ -87,11 +70,9 @@ func (f *Factory) LogICECandidates() bool {
 }
 
 // ConnectDelay returns the pre-SetRemoteDescription delay applied inside
-// PeerConnection.Connect. Reduces wasted STUN binding requests when
-// Telegram's SFU takes a moment to register our ICE credentials after
-// the MTProto join — without it, pion fires 7+ rapid binding requests
-// into a server that replies with error responses, burning the per-pair
-// retry budget before the SFU is even ready. 0 = no delay.
+// PeerConnection.Connect, between the local-offer rollback and the
+// remote-offer apply. Gives Telegram's SFU a head-start to register our
+// ICE credentials so pion's first STUN binding succeeds. 0 = no delay.
 func (f *Factory) ConnectDelay() time.Duration {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -100,10 +81,11 @@ func (f *Factory) ConnectDelay() time.Duration {
 
 type FactoryOptions struct {
 	Logger *slog.Logger
-	// ICEServers overrides ICE server configuration. Default (nil) uses
-	// Google's public STUN so NAT'd bots discover a public srflx
-	// candidate. Pass an empty (non-nil) slice to disable STUN entirely;
-	// pass TURN entries for restrictive networks.
+	// ICEServers overrides ICE server configuration. Default (nil/empty)
+	// is no STUN — pion gathers host candidates only and Telegram's SFU
+	// peer-reflexively learns our post-NAT source from the first inbound
+	// binding (matches ntgcalls). Pass TURN entries when the network
+	// blocks UDP host-to-host reachability.
 	ICEServers []webrtc.ICEServer
 	// NetworkTypes overrides the candidate network-type whitelist. Default is
 	// UDP4+UDP6 (matching ntgcalls). Use this to restrict to UDP4-only or add
@@ -118,25 +100,16 @@ type FactoryOptions struct {
 	ICEFailedTimeout time.Duration
 	// ICEKeepaliveInterval — STUN keepalive cadence. 0 = library default (2 s).
 	ICEKeepaliveInterval time.Duration
-	// ICEPreConnectDelay sleeps inside PeerConnection.Connect, after
-	// remote-params parsing but before SetRemoteDescription. Gives
-	// Telegram's SFU a head-start to register our credentials so the
-	// first STUN binding actually succeeds. Library default is 250 ms
-	// when this field is left zero; pass any negative duration to
-	// disable the delay entirely. Pair with ICEMaxBindingRequests for
-	// defense in depth. Small values (100-300 ms) are imperceptible
-	// to users.
+	// ICEPreConnectDelay sleeps inside PeerConnection.Connect, between
+	// the local-offer rollback and SetRemoteDescription. Gives Telegram's
+	// SFU a head-start to register our credentials so pion's first STUN
+	// binding succeeds. Library default is 250 ms when this field is
+	// left zero; pass any negative duration to disable the delay entirely.
 	ICEPreConnectDelay time.Duration
 	// ICEMaxBindingRequests overrides pion's per-pair STUN binding retry
-	// budget. Pion's default is 7; combined with the 200 ms check interval
-	// that gives each pair only ~1.4 s before being permanently failed.
-	// Telegram's SFU often takes longer to register our ICE credentials
-	// post-JoinGroupCall and replies with STUN error responses in the
-	// meantime — pion treats those as failures and burns the whole budget
-	// in ~1.4 s, then sits idle until the 30 s connect gate fires. We
-	// default to 150 (≈30 s of retries at 200 ms), aligning per-pair
-	// retry with the connect gate so a slow SFU registration still recovers.
-	// 0 = library default (150).
+	// budget. 0 = pion's default (7), which is fine now that gotgcall
+	// runs as ICE-CONTROLLED and no longer burns the budget on STUN
+	// error responses from role conflicts.
 	ICEMaxBindingRequests uint16
 	SharedUDPMux          bool
 	// PionTraceAsDebug remaps pion's Trace level to slog.LevelDebug instead
@@ -194,27 +167,13 @@ func NewFactory(opts FactoryOptions) (*Factory, error) {
 		keepalive = 2 * time.Second // unchanged — more-frequent keepalive helps NAT bindings
 	}
 	settings.SetICETimeouts(disconnect, failed, keepalive)
-	// Per-pair STUN binding retry budget. Pion's default (7) lets each
-	// candidate pair die in ~1.4 s (7 × 200 ms check interval) if early
-	// STUN bindings get error responses — common when Telegram's SFU
-	// hasn't finished registering our credentials post-JoinGroupCall.
-	// We default to 150 (≈30 s of retries), matching the standard
-	// connect gate so a slow registration still recovers within the
-	// gate window instead of leaving pion to idle-tick on a dead
-	// checklist until timeout.
-	maxBindReq := opts.ICEMaxBindingRequests
-	if maxBindReq == 0 {
-		maxBindReq = 150
+	// Per-pair STUN binding retry budget. Pion's default (7) is enough
+	// now that we run as ICE-CONTROLLED — without role conflicts, error
+	// responses are rare and don't burn through the budget. Caller can
+	// still bump it via ICEMaxBindingRequests for hostile networks.
+	if opts.ICEMaxBindingRequests > 0 {
+		settings.SetICEMaxBindingRequests(opts.ICEMaxBindingRequests)
 	}
-	settings.SetICEMaxBindingRequests(maxBindReq)
-	// Zero per-candidate-type acceptance windows so pion considers host
-	// and srflx candidates immediately — no stagger delay before the
-	// srflx (the only routable candidate behind NAT) gets used.
-	settings.SetHostAcceptanceMinWait(0)
-	settings.SetSrflxAcceptanceMinWait(0)
-	settings.SetPrflxAcceptanceMinWait(0)
-	settings.SetRelayAcceptanceMinWait(0)
-	settings.SetSTUNGatherTimeout(8 * time.Second)
 	// Skip virtual / VPN interfaces — gathering candidates on them slows ICE
 	// and produces unreachable pairs. Captured by the closure once; each
 	// candidate-gather pass does N substring scans rather than re-walking

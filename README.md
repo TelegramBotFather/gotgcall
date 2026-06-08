@@ -45,6 +45,8 @@ Work in progress. Built for my own bots; the API is intentionally close to ntgca
   - [`FromShells` — dual ffmpeg legs](#fromshells--dual-ffmpeg-legs)
   - [`EncodeOptions`](#encodeoptions)
 - [Client options](#client-options)
+  - [Enabling debug logs](#enabling-debug-logs)
+  - [UDP mux & scaling](#udp-mux--scaling)
 - [Lifecycle](#lifecycle)
   - [WebRTC mode](#webrtc-mode)
   - [RTMP mode](#rtmp-mode)
@@ -53,12 +55,15 @@ Work in progress. Built for my own bots; the API is intentionally close to ntgca
 - [Server-side media-state changes](#server-side-media-state-changes-admin-mute-video-off)
 - [Errors](#errors)
 - [Concurrency model](#concurrency-model)
+- [Goroutine budget](#goroutine-budget)
 - [Networking](#networking)
-- [Performance notes](#performance-notes)
+- [Performance tuning](#performance-tuning)
 - [A/V sync](#av-sync)
 - [Pitfalls](#pitfalls)
 - [Performance vs ntgcalls](#performance-vs-ntgcalls)
 - [Why pure Go](#why-pure-go)
+- [FAQ](#faq)
+- [See also](#see-also)
 - [License](#license)
 
 ## Install
@@ -105,7 +110,11 @@ Requires Go 1.26+ (uses `errors.AsType[T]` and a few stdlib features added in 1.
 
 **One WebRTC stack per call.** Send-only audio (Opus PT=111) and video (VP8 PT=100). All calls share one `wrtc.Factory` (and optionally one UDP socket; see `WithSharedUDPMux`).
 
+**Native WebRTC stack — no `pion/webrtc.PeerConnection`.** Connections are built directly on `pion/ice`, `pion/dtls`, `pion/srtp`, and `pion/rtp`. The high-level pion/webrtc PeerConnection went through SDP offer/answer with the offerer hardcoded as ICE-CONTROLLING, which conflicted with Telegram's own CONTROLLING role and produced a 487 STUN-error storm pion couldn't recover from. Composing the lower-level packages directly lets us run as ICE-CONTROLLED via `ice.Agent.Accept` from the first packet, sidestepping the conflict entirely.
+
 **ffmpeg outputs ENCODED Opus (OGG) and VP8 (IVF), not raw PCM/YUV.** The Track sink expects already-encoded frames, so ffmpeg does the encoding and we skip a Go-side Opus encoder (which would force cgo). This also saves ~48× pipe bandwidth versus PCM.
+
+**Factory-side monitor (one goroutine, all calls).** A single per-`Factory` ticker (`wrtc/keepalive.go`) does two jobs: it generates VP8 padding every ~2 s on every active video track so Telegram's SFU doesn't garbage-collect the SSRC binding during long quiet stretches, and it force-closes any PC stuck out of Connected past 15 s so leaked ICE agents can't outlive the `SetSource` gate. See [Goroutine budget](#goroutine-budget) for the full picture.
 
 ## Quick start
 
@@ -449,7 +458,7 @@ All errors are sentinels — branch with `errors.Is`:
 | `ErrFFmpegCrashed` | ffmpeg exited non-zero; wrapped error carries `exit=<code>` and the last 512 bytes of stderr for diagnosis. Surfaced both via `OnStreamEnd` and on the `ShellReader.Read` EOF path (the Reader briefly waits — bounded 200 ms — for the reap goroutine to capture the real exit before returning, so a fast-failing child no longer collapses to a bare `io.EOF` swallowed by the OGG/IVF parser). |
 | `ErrFile` | Source contained no playable audio or video stream (OGG / IVF parse failed). |
 | `ErrClosed` | Any method called after `Client.Close()`. |
-| `ErrNotConnected` | `SetSource` timed out waiting for WebRTC to reach Connected (15 s). |
+| `ErrNotConnected` | `SetSource` timed out waiting for WebRTC to reach Connected (10 s default; override with `WithConnectTimeout`). |
 | `ErrInternal` | Wrapping for pion API errors that shouldn't happen (e.g. `CreateOffer` failure). |
 | `ErrWrongMode` | WebRTC-only method called on an RTMP call (or vice versa). |
 
@@ -462,20 +471,53 @@ All errors are sentinels — branch with `errors.Is`:
 - The createMu map entry is freed in `Stop` (you can re-use the chatID cleanly).
 - Callbacks fire on a single dispatcher goroutine — no inter-callback parallelism, but no risk of deadlocking the producer either.
 
+## Goroutine budget
+
+The library is deliberately frugal with goroutines. Inventory:
+
+**Per-process / per-`Factory` (constant, shared across every call):**
+
+| Goroutine | Where | Purpose |
+| --- | --- | --- |
+| `monitor.run` | `wrtc/keepalive.go` | One timer loop that paces video keepalive padding for every active PC and force-closes any PC stuck out of Connected past 15 s. |
+| `dispatcher.loop` | `utils/synccallback.go` | Serializes every callback (`OnStreamEnd`, `OnConnectionChange`, `OnMediaStateChange`) so user code can safely re-enter the API. |
+| `certpool.refill` | `wrtc/native/certpool.go` | Pre-generates ECDSA-P256 DTLS certs so `CreateCall` never blocks on keygen during bursts. Skipped entirely when `WithDTLSCertPool(0)`. Sleeps on a buffered channel send when the pool is full. |
+
+**Per-call (proportional to live call count):**
+
+| Goroutine | Where | Purpose |
+| --- | --- | --- |
+| 2× `streamer.run` | `media/streamer.go` | One for audio, one for video. Paces `media.Sample` frames at wall-clock cadence and writes them to the pion track. |
+| 1× `stack.drainInbound` | `wrtc/native/stack.go` | Drains the SRTP packet conn after DTLS finishes. Required so pion ICE's recv buffer doesn't fill — we send only, but Telegram still talks back. |
+
+**Per-source (only when an ffmpeg subprocess is involved):**
+
+| Goroutine | Where | Purpose |
+| --- | --- | --- |
+| 1× `shellReader.reap` | `io/shell_reader.go` | Blocks on `cmd.Wait` and fires the configured `OnExit` hook once the process is fully reaped. The same goroutine also drives any consumer-supplied lifecycle callback, so RTMPCall doesn't need a separate watcher. |
+
+That's it for code we own. pion adds ~5–8 internal goroutines per call (ICE agent task loop, DTLS handshake, srtp readers); those are upstream and not reducible from here.
+
+Notes:
+- Audio + video streamers stay separate because `Source.Next()` can block on disk/network I/O; combining them would let one leg starve the other. The cost is one extra goroutine per call.
+- The keepalive monitor was the obvious goroutine-per-call candidate. It is **one goroutine per Factory**, not per call — a single ticker iterates a map snapshot. Callers that spin thousands of concurrent calls don't pay for thousands of watchdogs.
+- `pc.Close()` unregisters from the monitor synchronously, so dead entries never leak and never re-tick.
+
 ## Networking
 
 - **Transport:** UDP4 + UDP6 by default. Override with `WithNetworkTypes(...)` to restrict or add TCP.
 - **STUN / TURN:** none by default — host candidates work for the great majority of deployments. Pass `WithICEServers(...)` if you need TURN for symmetric NAT / blocked UDP.
 - **Interface filter:** virtual / VPN interfaces (Docker bridges, WSL, VMware, Tailscale, ZeroTier, OpenVPN, etc.) are skipped automatically. Override is not exposed; report a bug if your interface name is being filtered incorrectly.
-- **UDP mux:** default = one socket per call. Pass `WithSharedUDPMux()` to multiplex all calls through one `udp4:0` socket (useful at 100+ concurrent calls).
-- **Connect gate:** `SetSource` waits up to 10 s for ICE + DTLS to reach Connected before returning `ErrNotConnected`. Override with `WithConnectTimeout(...)`.
+- **UDP mux:** default = one socket per call. Pass `WithSharedUDPMux()` to multiplex all calls through one `udp4:0` socket (recommended once you're above ~1 000 concurrent calls — see [UDP mux & scaling](#udp-mux--scaling)).
+- **Connect gate:** `SetSource` waits up to 10 s for ICE + DTLS to reach Connected before returning `ErrNotConnected`. Override with `WithConnectTimeout(...)`. A factory-side watchdog also force-closes any PC stuck out of Connected for 15 s, so a leaked socket can never outlive the gate.
 - **ICE timeouts:** 60 s disconnect grace, 120 s before declaring failed, 2 s keepalive. Override with `WithICETimeouts(...)`.
+- **ICE role:** hardcoded CONTROLLED. Telegram's SFU is always CONTROLLING; pinning our side means we never hit pion's role-conflict (487 storm) path and the connection converges in tens of milliseconds.
 
 ## Performance tuning
 
 - **Cert pool size** (`WithDTLSCertPool`): default 8; raise for very bursty workloads. ECDSA-P256 keygen costs ~10 ms per call — the pool keeps a buffer ready so `CreateCall` doesn't block on it.
 - **Dispatch buffer** (`WithDispatchBuffer`): default 256. Raise if you see drop warnings under bursty callback fan-out.
-- **Shared UDP mux** (`WithSharedUDPMux`): collapses every call onto one `udp4:0` socket via `ice.UDPMuxDefault`. Cuts socket-table pressure and FD use at 100+ concurrent calls. Closed cleanly when the Factory shuts down.
+- **Shared UDP mux** (`WithSharedUDPMux`): collapses every call onto one `udp4:0` socket via `ice.UDPMuxDefault`. Cuts socket-table pressure and FD use once you're above ~1 000 concurrent calls. Closed cleanly when the Factory shuts down.
 - **Fast cold-start:** `FromFile` / `FromURL` already inject `-analyzeduration 0 -probesize 64k`, cutting ~1–2 s from ffmpeg startup. If you go custom via `FromShell`, set the same flags.
 
 ### Memory usage
@@ -493,7 +535,7 @@ Notes:
 - Go-heap growth is dominated by per-Stack pion buffers (~1 MB ICE + DTLS + SRTP scratch, single 1500-byte SRTP encrypt buffer reused per write).
 - Audio-only is the cheap path. The 25–40 MB number for video is ffmpeg's libvpx encoder state, not gotgcall.
 - `WithSharedUDPMux` saves ~4 KB kernel socket buffer per call (the dominant kernel cost on 10 K+ call boxes; you also save FDs).
-- No per-call goroutines beyond: 1 streamer (audio leg), 1 streamer (video leg, optional), 1 SRTP drain reader, 1 dispatcher (shared across all calls). pion's internal ICE/DTLS goroutines add ~5–8 per call.
+- Goroutine inventory: see [Goroutine budget](#goroutine-budget) — 3 shared per Factory, 3 per call, plus pion's ~5–8 ICE/DTLS internals.
 
 ### Concurrency / scaling ballparks
 
@@ -546,7 +588,7 @@ The actual numbers above are order-of-magnitude estimates; benchmark on your wor
 
 ntgcalls works fine but pulls in libwebrtc + glibc + a C++ build chain. Cross-compiling music bots becomes a maintenance burden. `gotgcall` builds with `CGO_ENABLED=0` to a single static binary on every supported platform. The trade-off is ffmpeg as a runtime dependency, which most bot deployments already have anyway.
 
-The WebRTC layer underneath gotgcall is built directly on pion's lower-level packages (`pion/ice`, `pion/dtls`, `pion/srtp`, `pion/rtp`) — no `pion/webrtc.PeerConnection`. Connections are stable against the Telegram-SFU edges that previously caused intermittent stuck-in-connecting failures.
+The WebRTC layer underneath gotgcall is built directly on pion's lower-level packages (`pion/ice`, `pion/dtls`, `pion/srtp`, `pion/rtp`) — no `pion/webrtc.PeerConnection`. Connections run as ICE-CONTROLLED via `ice.Agent.Accept` from the first packet (Telegram is always CONTROLLING), so the role conflict that previously caused stuck-in-connecting failures cannot occur. The native stack also lets the close path target only the topmost installed layer, avoiding the double-close panic in pion/ice v4.2.7's task loop.
 
 ## FAQ
 

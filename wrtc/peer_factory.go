@@ -2,7 +2,6 @@ package wrtc
 
 import (
 	"context"
-	"errors"
 	"log/slog"
 	"net"
 	"strings"
@@ -45,8 +44,12 @@ type Factory struct {
 	inner   *native.Factory
 	monitor *FactoryMonitor
 	log     *slog.Logger
-	mu      sync.Mutex
-	closed  bool
+	// mux is the shared UDP mux when SharedUDPMux is enabled, nil
+	// otherwise. Its Close closes the underlying socket via pion's
+	// own sync.Once, so no separate handle to that socket is kept.
+	mux    ice.UDPMux
+	mu     sync.Mutex
+	closed bool
 }
 
 // FactoryOptions matches the historical public shape so the gotgcall
@@ -93,8 +96,15 @@ func NewFactory(opts FactoryOptions) (*Factory, error) {
 		return nil, err
 	}
 
-	var mux any // ice.UDPMux — actual creation deferred to native if shared
-	_ = mux     // SharedUDPMux is currently ignored (one socket per call); see note below.
+	var mux ice.UDPMux
+	if opts.SharedUDPMux {
+		muxConn, lerr := net.ListenPacket("udp4", ":0")
+		if lerr != nil {
+			return nil, lerr
+		}
+		// UDPMuxDefault.Close closes the wrapped conn — no extra handle.
+		mux = ice.NewUDPMuxDefault(ice.UDPMuxParams{UDPConn: muxConn})
+	}
 
 	innerOpts := native.FactoryOptions{
 		Logger:             log,
@@ -103,6 +113,7 @@ func NewFactory(opts FactoryOptions) (*Factory, error) {
 		ICEServers:         servers,
 		InterfaceFilter:    defaultInterfaceFilter,
 		IPFilter:           defaultIPFilter,
+		UDPMux:             mux,
 		ICEPreConnectDelay: opts.ICEPreConnectDelay,
 	}
 	inner, err := native.NewFactory(innerOpts)
@@ -115,6 +126,7 @@ func NewFactory(opts FactoryOptions) (*Factory, error) {
 		inner:   inner,
 		monitor: monitor,
 		log:     log,
+		mux:     mux,
 	}, nil
 }
 
@@ -135,7 +147,8 @@ func (f *Factory) newStack(ctx context.Context) (*native.Stack, error) {
 	return f.inner.NewStack(ctx, true)
 }
 
-// Close shuts the factory + monitor down.
+// Close shuts the factory + monitor down + releases the shared UDP
+// socket (if any).
 func (f *Factory) Close() error {
 	f.mu.Lock()
 	closed := f.closed
@@ -147,10 +160,18 @@ func (f *Factory) Close() error {
 	if f.monitor != nil {
 		f.monitor.Stop()
 	}
+	var firstErr error
 	if f.inner != nil {
-		return f.inner.Close()
+		if err := f.inner.Close(); err != nil {
+			firstErr = err
+		}
 	}
-	return nil
+	if f.mux != nil {
+		if err := f.mux.Close(); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	return firstErr
 }
 
 func translateNetworkTypes(in []NetworkType) []ice.NetworkType {
@@ -213,9 +234,3 @@ var skipInterfaceSubstrings = [...]string{
 	"loopback", "teredo", "isatap", "tap-",
 	"docker", "wsl", "tailscale", "zerotier", "openvpn",
 }
-
-// errICEServerInvalid keeps the legacy error sentinel exposed so any
-// caller still doing errors.Is comparisons keeps compiling.
-var errICEServerInvalid = errors.New("wrtc: invalid ICE server URL")
-
-var _ = errICEServerInvalid // referenced via errors.Is in legacy callers; keep symbol live.

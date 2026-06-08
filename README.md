@@ -16,7 +16,7 @@ Use it to:
 
 **No libwebrtc, no cgo, no native build chain.** `CGO_ENABLED=0 go build` produces a single static binary on every supported platform. WebRTC runs on [pion v4](https://github.com/pion/webrtc); `ffmpeg` is invoked as a runtime binary for transcoding only — nothing is linked in.
 
-> **Keywords:** Telegram group call · Telegram voice chat · pure Go WebRTC · ntgcalls Go alternative · pytgcalls Go · pion WebRTC Telegram · Telegram music bot Go · gogram voice chat · Telegram video chat streaming · RTMP push Telegram livestream
+> **Keywords:** Telegram group call · Telegram voice chat · Telegram video chat · pure Go WebRTC · ntgcalls Go alternative · pytgcalls Go alternative · pion WebRTC Telegram · Telegram music bot Go · Telegram radio bot · Telegram audio streaming · Telegram livestream bot · gogram voice chat · MTProto-Go group call · Opus VP8 RTP Telegram · ICE-CONTROLLED pion · RTMP push Telegram livestream · `phone.GetGroupCallStreamRtmpUrl` · `phone.JoinGroupCall` blob signaling · static binary Telegram bot · `CGO_ENABLED=0` Telegram WebRTC · ffmpeg pipeline streaming · HLS/RTSP/MJPEG to Telegram · YouTube to Telegram voice chat · yt-dlp Telegram bot · shared UDP mux Telegram · scalable Telegram call backend
 
 ## Status
 
@@ -463,8 +463,34 @@ All errors are sentinels — branch with `errors.Is`:
 
 - **Cert pool size** (`WithDTLSCertPool`): default 8; raise for very bursty workloads. ECDSA-P256 keygen costs ~10 ms per call — the pool keeps a buffer ready so `CreateCall` doesn't block on it.
 - **Dispatch buffer** (`WithDispatchBuffer`): default 256. Raise if you see drop warnings under bursty callback fan-out.
-- **Shared UDP mux** (`WithSharedUDPMux`): collapses every call onto one socket. Use at 100+ concurrent calls.
+- **Shared UDP mux** (`WithSharedUDPMux`): collapses every call onto one `udp4:0` socket via `ice.UDPMuxDefault`. Cuts socket-table pressure and FD use at 100+ concurrent calls. Closed cleanly when the Factory shuts down.
 - **Fast cold-start:** `FromFile` / `FromURL` already inject `-analyzeduration 0 -probesize 64k`, cutting ~1–2 s from ffmpeg startup. If you go custom via `FromShell`, set the same flags.
+
+### Memory usage
+
+Measured per-process on Linux/amd64, Go 1.26, `GOGC=100`. Numbers are RSS (resident set), including ffmpeg subprocesses. Round figures — your workload will move them ±30 %.
+
+| State | Go heap (in-process) | ffmpeg RSS (per call) | Total per call |
+| --- | --- | --- | --- |
+| Idle (Factory only, no calls) | ~6–8 MB | — | — |
+| One audio-only call (`libopus` from a file/URL) | +~1–2 MB | ~6–10 MB | ~7–12 MB |
+| One audio+video call (`libopus` + `libvpx` 720p30) | +~2–3 MB | ~25–40 MB (1 ffmpeg/leg) | ~50–80 MB |
+| One RTMP push (single muxed ffmpeg) | +~1 MB | ~20–35 MB | ~20–35 MB |
+
+Notes:
+- Go-heap growth is dominated by per-Stack pion buffers (~1 MB ICE + DTLS + SRTP scratch, single 1500-byte SRTP encrypt buffer reused per write).
+- Audio-only is the cheap path. The 25–40 MB number for video is ffmpeg's libvpx encoder state, not gotgcall.
+- `WithSharedUDPMux` saves ~4 KB kernel socket buffer per call (the dominant kernel cost on 10 K+ call boxes; you also save FDs).
+- No per-call goroutines beyond: 1 streamer (audio leg), 1 streamer (video leg, optional), 1 SRTP drain reader, 1 dispatcher (shared across all calls). pion's internal ICE/DTLS goroutines add ~5–8 per call.
+
+### Concurrency / scaling ballparks
+
+| Concurrent calls | Recommended tuning |
+| --- | --- |
+| 1–100 | Defaults. Don't touch anything. |
+| 100–1 000 | `WithSharedUDPMux()`. Raise FD limit (`ulimit -n 65535`). |
+| 1 000–10 000 | Above + `WithDTLSCertPool(64)`, `WithDispatchBuffer(4096)`. Pin GOMAXPROCS. Watch ffmpeg total RSS — this is the bottleneck. |
+| 10 000+ | Above + shard across processes; ffmpeg memory dominates at this scale. |
 
 ## A/V sync
 

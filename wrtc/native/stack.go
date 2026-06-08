@@ -52,12 +52,12 @@ type Stack struct {
 
 	agent    *ice.Agent
 	iceConn  *ice.Conn
+	iceOnce  *onceCloseConn
 	dtlsConn *dtls.Conn
 	srtpCtx  *srtp.Context
 
 	onStateChange ConnStateFn
 	drainCancel   context.CancelFunc
-	drainDone     chan struct{}
 
 	ufrag string
 	pwd   string
@@ -174,7 +174,6 @@ func NewStack(opts Options) (*Stack, error) {
 		video:        videoTrack,
 		agent:        agent,
 		connectDelay: opts.ConnectDelay,
-		drainDone:    make(chan struct{}),
 		encryptBuf:   make([]byte, 0, 1500),
 	}
 	s.state.Store(int32(models.Connecting))
@@ -269,10 +268,18 @@ func (s *Stack) Connect(ctx context.Context, remoteJSON string) error {
 		return fmt.Errorf("%w: ice accept: %v", models.ErrConnectionFailed, err)
 	}
 	s.iceConn = iceConn
+	// Wrap iceConn so its Close is idempotent. pion/dtls's handshake
+	// spawns an internal watcher goroutine (Conn.handshake.func3) that
+	// also calls c.nextConn.Close on connection teardown. Combined with
+	// our own Stack.Close path, that's multiple closes hitting the
+	// ice.Agent — and pion/ice v4.2.7's taskloop closes its `done`
+	// channel without sync.Once, panicking on the second close. The
+	// wrapper collapses all paths to a single underlying close.
+	s.iceOnce = &onceCloseConn{Conn: iceConn}
 
 	// DTLS handshake. We are the SERVER (setup=passive in the JoinGroupCall
 	// payload). Telegram's SFU is DTLS-active and sends ClientHello.
-	packetConn := dtlsnet.PacketConnFromConn(iceConn)
+	packetConn := dtlsnet.PacketConnFromConn(s.iceOnce)
 	dtlsConn, err := dtls.ServerWithOptions(
 		packetConn,
 		iceConn.RemoteAddr(),
@@ -355,31 +362,71 @@ func (s *Stack) State() models.ConnState {
 
 // Close tears the stack down idempotently. Drain goroutine exits when
 // the iceConn closes from underneath it.
+//
+// Only the topmost installed layer is closed. Each pion layer's Close
+// cascades to the layer below (dtls.Conn.Close → packet conn → ice.Conn
+// → ice.Agent), so closing all three would re-enter ice.Agent.Close —
+// and v4.2.7's taskloop.Close panics on the second close. The
+// idempotent iceConn wrapper further guards against pion's own
+// internal close paths (handshake.func3) racing this one.
+//
+// transitionTo(Closed) fires OUTSIDE closeOnce.Do because the user
+// callback it invokes may itself call Stack.Close — sync.Once's
+// recursive-call semantics would deadlock if that re-entered Do from
+// within fn. Doing the transition after Do returns means the recursive
+// Close is just a fast no-op.
 func (s *Stack) Close() error {
-	var firstErr error
+	var (
+		firstErr error
+		fired    bool
+	)
 	s.closeOnce.Do(func() {
+		fired = true
 		s.closed.Store(true)
 		if s.drainCancel != nil {
 			s.drainCancel()
 		}
-		if s.dtlsConn != nil {
-			if err := s.dtlsConn.Close(); err != nil && firstErr == nil {
+		switch {
+		case s.dtlsConn != nil:
+			if err := s.dtlsConn.Close(); err != nil {
+				firstErr = err
+			}
+		case s.iceOnce != nil:
+			if err := s.iceOnce.Close(); err != nil {
+				firstErr = err
+			}
+		case s.iceConn != nil:
+			if err := s.iceConn.Close(); err != nil {
+				firstErr = err
+			}
+		case s.agent != nil:
+			if err := s.agent.Close(); err != nil {
 				firstErr = err
 			}
 		}
-		if s.iceConn != nil {
-			if err := s.iceConn.Close(); err != nil && firstErr == nil {
-				firstErr = err
-			}
-		}
-		if s.agent != nil {
-			if err := s.agent.Close(); err != nil && firstErr == nil {
-				firstErr = err
-			}
-		}
-		s.transitionTo(models.Closed)
 	})
+	if fired {
+		s.transitionTo(models.Closed)
+	}
 	return firstErr
+}
+
+// onceCloseConn wraps a net.Conn so that Close fires at most once on
+// the underlying conn. It exists because pion/ice v4.2.7's Agent close
+// path is not idempotent (taskloop's `close(done)` lacks sync.Once) and
+// multiple goroutines — pion/dtls's handshake watcher + our Stack.Close
+// — both reach it through the connection-close cascade. The wrapper
+// preserves net.Conn semantics by embedding (Read/Write/SetDeadline
+// pass through unchanged).
+type onceCloseConn struct {
+	net.Conn
+	err  error
+	once sync.Once
+}
+
+func (c *onceCloseConn) Close() error {
+	c.once.Do(func() { c.err = c.Conn.Close() })
+	return c.err
 }
 
 // drainInbound is a single per-stack goroutine that reads + discards
@@ -388,7 +435,6 @@ func (s *Stack) Close() error {
 // re-handshake / rekey traffic we have no use for and back-pressure
 // halts the agent's UDP read loop.
 func (s *Stack) drainInbound() {
-	defer close(s.drainDone)
 	buf := make([]byte, 1500)
 	for {
 		select {
@@ -439,9 +485,19 @@ func (s *Stack) transitionTo(next models.ConnState) {
 	s.onStateChangeMu.RLock()
 	fn := s.onStateChange
 	s.onStateChangeMu.RUnlock()
-	if fn != nil {
-		fn(next)
+	if fn == nil {
+		return
 	}
+	// Recover so a panic in user code (or a slow callback that races
+	// teardown) cannot kill the pion ICE goroutine that called us via
+	// onAgentState. The goroutine continuing past a bad callback means
+	// later state notifications still arrive.
+	defer func() {
+		if r := recover(); r != nil {
+			s.log.Error("state callback panic", "state", next.String(), "panic", r)
+		}
+	}()
+	fn(next)
 }
 
 // srtpWriter adapts the encrypt-only srtp.Context to the

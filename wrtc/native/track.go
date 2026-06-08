@@ -1,6 +1,7 @@
 package native
 
 import (
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -33,24 +34,23 @@ const (
 //
 // Concurrency:
 //   - writeStream is published once (Connect → AttachWriteStream) and
-//     thereafter read-only from many goroutines (audio streamer, video
-//     streamer, keepalive). Stored in an atomic.Pointer so the hot path
-//     (every WriteSample) reads it lock-free.
-//   - absSendBuf is rewritten on each writePackets call before being
-//     stamped into the headers of that call's packets. Since SRTP marshal
-//     copies the slice into the wire bytes synchronously inside WriteRTP,
-//     reuse across packets within a single call is safe. Reuse across
-//     concurrent WriteSample calls on the SAME Track is NOT safe — the
-//     streamer always paces a single goroutine per Track so this is
-//     enforced upstream; the keepalive uses the video Track and never
-//     overlaps with the video streamer write because both run on the
-//     factory monitor's serial tick.
+//     thereafter read-only from many goroutines. Stored in an
+//     atomic.Pointer so the hot path reads it lock-free.
+//   - writeMu serialises writePackets calls within a single Track so
+//     the streamer goroutine and the keepalive goroutine cannot mutate
+//     absSendBuf concurrently (SetExtension stores the slice by
+//     reference; pion/rtp marshals it during the subsequent SRTP write,
+//     so the buffer is in-flight until WriteRTP returns).
+//   - The mutex is per-Track. Audio and video Tracks have independent
+//     mutexes; the shared SRTP context further down still serialises
+//     encryption across both via Stack.srtpWriteMu.
 type Track struct {
 	packetizer  rtp.Packetizer
 	writeStream atomic.Pointer[writerSlot]
 	mid         string
 	absSendBuf  []byte
 	midBuf      []byte
+	writeMu     sync.Mutex
 	kind        Kind
 	ssrc        uint32
 	clockRate   uint32
@@ -142,11 +142,15 @@ func (t *Track) writePackets(pkts []*rtp.Packet) error {
 	}
 	ws := slot.w
 
-	// Compute abs-send-time once per WriteSample call: every packet from a
-	// single sample shares the same send instant within the resolution we
-	// care about. Re-using one 3-byte buffer across packets avoids per-
-	// packet heap traffic; SRTP marshal copies the slice into the wire
-	// header before WriteRTP returns, so reuse is safe.
+	t.writeMu.Lock()
+	defer t.writeMu.Unlock()
+
+	// Compute abs-send-time once per writePackets call: every packet from
+	// a single sample shares the same send instant within the resolution
+	// we care about. Reusing one 3-byte buffer across packets within the
+	// mutex avoids per-packet heap traffic; pion/rtp marshals the slice
+	// into the wire header during WriteRTP (still inside this lock), so
+	// reuse is safe against concurrent writers on the SAME Track.
 	now := time.Now()
 	abs := (uint64(now.Unix())<<18 | uint64(now.Nanosecond())*uint64(1<<18)/uint64(1e9)) & 0x00FFFFFF
 	t.absSendBuf[0] = byte(abs >> 16)

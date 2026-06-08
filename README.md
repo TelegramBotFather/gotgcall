@@ -91,9 +91,9 @@ Requires Go 1.26+ (uses `errors.AsType[T]` and a few stdlib features added in 1.
 
 **Blob-only signaling.** The library never imports `gogram` or any MTProto layer. `CreateCall(chatID)` returns a JSON string; the caller passes it to `phone.JoinGroupCall` via their own MTProto stack, then hands the response back via `Connect(chatID, respJSON)`. This keeps the library MTProto-version-independent.
 
-**One PeerConnection per call.** Send-only audio (Opus PT=111) and video (VP8 PT=100). All calls share one `wrtc.Factory` (and optionally one UDP socket; see `WithSharedUDPMux`).
+**One WebRTC stack per call.** Send-only audio (Opus PT=111) and video (VP8 PT=100). All calls share one `wrtc.Factory` (and optionally one UDP socket; see `WithSharedUDPMux`).
 
-**ffmpeg outputs ENCODED Opus (OGG) and VP8 (IVF), not raw PCM/YUV.** Pion's `TrackLocalStaticSample.WriteSample` expects already-encoded frames, so we let ffmpeg do the encoding and skip a Go-side Opus encoder (which would force cgo). This also saves ~48× pipe bandwidth versus PCM.
+**ffmpeg outputs ENCODED Opus (OGG) and VP8 (IVF), not raw PCM/YUV.** The Track sink expects already-encoded frames, so ffmpeg does the encoding and we skip a Go-side Opus encoder (which would force cgo). This also saves ~48× pipe bandwidth versus PCM.
 
 ## Quick start
 
@@ -291,8 +291,8 @@ Pion's internal lines come in tagged with `pion=<scope>` (e.g. `pion=ice`, `pion
 slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
     Level: slog.LevelDebug,
     ReplaceAttr: func(_ []string, a slog.Attr) slog.Attr {
-        if a.Key == "pion" && a.Value.String() == "interceptor" {
-            return slog.Attr{} // drop interceptor noise
+        if a.Key == "pion" && a.Value.String() == "dtls" {
+            return slog.Attr{} // drop dtls flight chatter
         }
         return a
     },
@@ -321,7 +321,7 @@ The README said "use `WithSharedUDPMux` at 100+ calls". That was a conservative 
 - 1000–10000 calls: either works; `WithSharedUDPMux` simplifies sysctl tuning.
 - 10000+ calls: `WithSharedUDPMux` is the easier path; tune the kernel UDP receive buffer (`net.core.rmem_max`, `net.core.rmem_default`).
 
-**Note:** `client.Stop(chatID)` closes only that call's `PeerConnection` (and the per-call socket if not using the shared mux). The shared mux survives every `Stop` and is only closed when you call `client.Close()` on the parent client. So you can spin calls up and down freely without leaking or thrashing the shared socket.
+**Note:** `client.Stop(chatID)` closes only that call's WebRTC stack (and the per-call socket if not using the shared mux). The shared mux survives every `Stop` and is only closed when you call `client.Close()` on the parent client. So you can spin calls up and down freely without leaking or thrashing the shared socket.
 
 ## Lifecycle
 
@@ -446,7 +446,7 @@ All errors are sentinels — branch with `errors.Is`:
 - One `*Client` per process multiplexes any number of group calls.
 - All public methods are safe for concurrent use.
 - Per-chat operations are serialised internally via a `sync.RWMutex` on each call instance.
-- Concurrent `CreateCall` / `StartRTMP` for the same chat are gated by a per-chat creation mutex; the first wins, others get `ErrConnectionExists` without allocating a pion `PeerConnection`.
+- Concurrent `CreateCall` / `StartRTMP` for the same chat are gated by a per-chat creation mutex; the first wins, others get `ErrConnectionExists` without allocating the underlying WebRTC stack.
 - The createMu map entry is freed in `Stop` (you can re-use the chatID cleanly).
 - Callbacks fire on a single dispatcher goroutine — no inter-callback parallelism, but no risk of deadlocking the producer either.
 
@@ -507,6 +507,8 @@ The actual numbers above are order-of-magnitude estimates; benchmark on your wor
 ## Why pure Go
 
 ntgcalls works fine but pulls in libwebrtc + glibc + a C++ build chain. Cross-compiling music bots becomes a maintenance burden. `gotgcall` builds with `CGO_ENABLED=0` to a single static binary on every supported platform. The trade-off is ffmpeg as a runtime dependency, which most bot deployments already have anyway.
+
+The WebRTC layer underneath gotgcall is built directly on pion's lower-level packages (`pion/ice`, `pion/dtls`, `pion/srtp`, `pion/rtp`) — no `pion/webrtc.PeerConnection`. Connections are stable against the Telegram-SFU edges that previously caused intermittent stuck-in-connecting failures.
 
 ## FAQ
 

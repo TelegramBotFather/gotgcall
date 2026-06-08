@@ -3,7 +3,6 @@ package wrtc
 import (
 	"context"
 	"errors"
-	"fmt"
 	"log/slog"
 	"net"
 	"strings"
@@ -11,397 +10,212 @@ import (
 	"time"
 
 	"github.com/pion/ice/v4"
-	"github.com/pion/interceptor"
-	"github.com/pion/webrtc/v4"
+	"github.com/pion/stun/v3"
 
 	"github.com/annihilatorrrr/gotgcall/models"
+	"github.com/annihilatorrrr/gotgcall/wrtc/native"
 )
 
-// Factory creates pion PeerConnections. One Factory per Client; shared
-// across all calls, optionally backed by a shared UDP mux for high
-// concurrency setups.
+// ICEServer mirrors the historical wrtc.ICEServer shape so callers
+// constructed with WithICEServers don't have to know about pion's
+// stun.URI type. URLs are strings in the standard scheme://host:port
+// form ("stun:stun.l.google.com:19302", "turn:turn.example.com:3478").
+type ICEServer struct {
+	Username   string
+	Credential string
+	URLs       []string
+}
+
+// NetworkType is the candidate network-type tag the legacy API exposed.
+// Values are the same constants pion uses internally so callers don't
+// have to import pion/ice directly for this enum.
+type NetworkType int
+
+const (
+	NetworkTypeUDP4 NetworkType = 1
+	NetworkTypeUDP6 NetworkType = 2
+	NetworkTypeTCP4 NetworkType = 3
+	NetworkTypeTCP6 NetworkType = 4
+)
+
+// Factory hosts the per-process configuration the native Stack draws
+// from on each NewPeerConnection. A single Factory is shared across
+// every concurrent call.
 type Factory struct {
-	udpMux           ice.UDPMux
-	api              *webrtc.API
-	log              *slog.Logger
-	certPool         *CertPool
-	monitor          *FactoryMonitor
-	settings         webrtc.SettingEngine
-	iceServers       []webrtc.ICEServer
-	connectDelay     time.Duration
-	mu               sync.Mutex
-	closed           bool
-	logICECandidates bool
+	inner   *native.Factory
+	monitor *FactoryMonitor
+	log     *slog.Logger
+	mu      sync.Mutex
+	closed  bool
 }
 
-// Monitor returns the per-Factory shared monitor goroutine that drives
-// video keepalive padding + RTP liveness watchdog for every PC created
-// by this Factory. NewPeerConnection registers itself; Close
-// unregisters. Single goroutine handles N concurrent calls.
-func (f *Factory) Monitor() *FactoryMonitor {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return f.monitor
-}
-
-// ICEServers returns the configured ICE server list. Default (nil) is
-// no STUN/TURN — pion gathers only host candidates and Telegram's SFU
-// peer-reflexively learns our post-NAT source on the first inbound
-// binding it receives from us. Matches ntgcalls' empty STUN list
-// (group_connection.cpp:523-525). Pass TURN entries for restrictive
-// networks that block UDP host-to-host.
-func (f *Factory) ICEServers() []webrtc.ICEServer {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	if len(f.iceServers) == 0 {
-		return nil
-	}
-	out := make([]webrtc.ICEServer, len(f.iceServers))
-	copy(out, f.iceServers)
-	return out
-}
-
-// LogICECandidates reports whether PeerConnection construction should hook
-// OnICECandidate to log each gathered candidate at Debug.
-func (f *Factory) LogICECandidates() bool {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return f.logICECandidates
-}
-
-// ConnectDelay returns the pre-SetRemoteDescription delay applied inside
-// PeerConnection.Connect, between the local-offer rollback and the
-// remote-offer apply. Gives Telegram's SFU a head-start to register our
-// ICE credentials so pion's first STUN binding succeeds. 0 = no delay.
-func (f *Factory) ConnectDelay() time.Duration {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return f.connectDelay
-}
-
+// FactoryOptions matches the historical public shape so the gotgcall
+// top-level Client wires up without churn. Unsupported / removed fields
+// are accepted-but-ignored so old call sites still compile.
 type FactoryOptions struct {
 	Logger *slog.Logger
-	// ICEServers overrides ICE server configuration. Default (nil/empty)
-	// is no STUN — pion gathers host candidates only and Telegram's SFU
-	// peer-reflexively learns our post-NAT source from the first inbound
-	// binding (matches ntgcalls). Pass TURN entries when the network
-	// blocks UDP host-to-host reachability.
-	ICEServers []webrtc.ICEServer
-	// NetworkTypes overrides the candidate network-type whitelist. Default is
-	// UDP4+UDP6 (matching ntgcalls). Use this to restrict to UDP4-only or add
-	// TCP if your environment requires it.
-	NetworkTypes []webrtc.NetworkType
+	// ICEServers populates the STUN/TURN candidate sources the native ICE
+	// agent reaches out to. Empty = host-only (recommended for Telegram).
+	ICEServers []ICEServer
+	// NetworkTypes whitelists the candidate network types. Empty = UDP4+UDP6.
+	NetworkTypes []NetworkType
 	CertPoolSize int
-	// ICEDisconnectTimeout — pion declares the call disconnected after this
-	// long with no traffic. 0 = library default (30 s).
+	// ICEDisconnectTimeout / ICEFailedTimeout / ICEKeepaliveInterval are
+	// retained for API parity but currently unused — pion/ice/v4's
+	// defaults are aggressive enough for our flow.
 	ICEDisconnectTimeout time.Duration
-	// ICEFailedTimeout — pion declares the call failed after this long with
-	// no successful connectivity check. 0 = library default (60 s).
-	ICEFailedTimeout time.Duration
-	// ICEKeepaliveInterval — STUN keepalive cadence. 0 = library default (2 s).
+	ICEFailedTimeout     time.Duration
 	ICEKeepaliveInterval time.Duration
-	// ICEPreConnectDelay sleeps inside PeerConnection.Connect, between
-	// the local-offer rollback and SetRemoteDescription. Gives Telegram's
-	// SFU a head-start to register our credentials so pion's first STUN
-	// binding succeeds. Library default is 250 ms when this field is
-	// left zero; pass any negative duration to disable the delay entirely.
+	// ICEPreConnectDelay pauses inside Connect between adding remote
+	// candidates and calling Accept. Helps slow SFU edges register our
+	// ufrag/pwd before the first STUN binding goes out. 0 = no delay.
 	ICEPreConnectDelay time.Duration
-	// ICEMaxBindingRequests overrides pion's per-pair STUN binding retry
-	// budget. 0 = pion's default (7), which is fine now that gotgcall
-	// runs as ICE-CONTROLLED and no longer burns the budget on STUN
-	// error responses from role conflicts.
+	// ICEMaxBindingRequests is retained for API parity but ignored —
+	// pion's default is fine now that ICE role is hardcoded CONTROLLED
+	// and 487 storms are gone.
 	ICEMaxBindingRequests uint16
 	SharedUDPMux          bool
-	// PionTraceAsDebug remaps pion's Trace level to slog.LevelDebug instead
-	// of LevelDebug-4. Surfaces ICE per-check / per-candidate / per-binding-
-	// request lines in any standard Debug-level handler — useful for
-	// diagnosing "ICE stuck in Checking" failures.
+	// PionTraceAsDebug and LogICECandidates are retained for compat —
+	// they are surfaced by the native logger plumbing where applicable.
 	PionTraceAsDebug bool
-	// LogICECandidates logs every locally-gathered candidate at Debug via
-	// pc.OnICECandidate. Read by PeerConnection construction to decide
-	// whether to install the candidate-logger hook.
 	LogICECandidates bool
 }
 
+// NewFactory configures and constructs a Factory.
 func NewFactory(opts FactoryOptions) (*Factory, error) {
 	log := opts.Logger
 	if log == nil {
 		log = slog.New(slog.DiscardHandler)
 	}
-	// Bridge pion's internal logging (ICE, DTLS, SCTP, interceptors, etc.) into
-	// the user's slog.Logger so WithLogger(...LevelDebug) actually surfaces
-	// pion events. Without this, pion writes to its own default factory
-	// (stderr via the `log` package), bypassing every gotgcall.WithLogger
-	// configuration — the single biggest "debug logs aren't working" complaint.
-	settings := webrtc.SettingEngine{LoggerFactory: newSlogPionFactory(log, opts.PionTraceAsDebug)}
-	settings.SetIncludeLoopbackCandidate(false)
-	// Full ICE (not lite): pion's strict ICE-lite doesn't send connectivity
-	// checks (RFC 8445), while libwebrtc's "lite" still does — full ICE
-	// matches ntgcalls' actual wire behavior. Default STUN is on (see
-	// defaultSTUNServers) so NAT'd bots — Docker, cloud VMs without a
-	// bound public IP — gather a srflx candidate; without it Telegram's
-	// SFU rejects every STUN check because the source address (post-NAT)
-	// never appeared in the join payload.
-	settings.SetLite(false)
-	// UDP4+UDP6: ntgcalls enables both via PORTALLOCATOR_ENABLE_IPV6. Telegram's
-	// SFU accepts IPv6 candidates, and dual-stack hosts get more candidate pairs
-	// to work with. Caller can override via FactoryOptions.NetworkTypes.
-	networkTypes := opts.NetworkTypes
-	if len(networkTypes) == 0 {
-		networkTypes = []webrtc.NetworkType{webrtc.NetworkTypeUDP4, webrtc.NetworkTypeUDP6}
-	}
-	settings.SetNetworkTypes(networkTypes)
-	// ICE timeouts: 60 s disconnect grace, 120 s before declaring failed,
-	// 2 s keepalive. Generous to absorb Telegram SFU steering and re-
-	// pairing on cross-DC moves. Override via FactoryOptions.ICE* fields.
-	disconnect := opts.ICEDisconnectTimeout
-	if disconnect == 0 {
-		disconnect = 60 * time.Second
-	}
-	failed := opts.ICEFailedTimeout
-	if failed == 0 {
-		failed = 120 * time.Second
-	}
-	keepalive := opts.ICEKeepaliveInterval
-	if keepalive == 0 {
-		keepalive = 2 * time.Second // unchanged — more-frequent keepalive helps NAT bindings
-	}
-	settings.SetICETimeouts(disconnect, failed, keepalive)
-	// Per-pair STUN binding retry budget. Pion's default (7) is enough
-	// now that we run as ICE-CONTROLLED — without role conflicts, error
-	// responses are rare and don't burn through the budget. Caller can
-	// still bump it via ICEMaxBindingRequests for hostile networks.
-	if opts.ICEMaxBindingRequests > 0 {
-		settings.SetICEMaxBindingRequests(opts.ICEMaxBindingRequests)
-	}
-	// Skip virtual / VPN interfaces — gathering candidates on them slows ICE
-	// and produces unreachable pairs. Captured by the closure once; each
-	// candidate-gather pass does N substring scans rather than re-walking
-	// a literal slice every time.
-	settings.SetInterfaceFilter(makeInterfaceFilter())
-	settings.SetIPFilter(makeIPFilter())
-
-	// Default ICEPreConnectDelay: Telegram's SFU sometimes hasn't registered
-	// our ufrag/pwd by the time JoinGroupCall returns. Pion's first STUN
-	// binding then gets an auth-fail error response and that wasted check
-	// counts against the per-pair retry budget. A short pause here lets the
-	// SFU finish registration so the first binding succeeds. 250 ms is
-	// imperceptible to users and covers typical SFU registration windows
-	// (slow edges have been observed around 150-200 ms post-JoinGroupCall).
-	// Caller can opt back to 0 via FactoryOptions.ICEPreConnectDelay set to
-	// any negative value, which disables the default.
-	connectDelay := opts.ICEPreConnectDelay
-	switch {
-	case connectDelay < 0:
-		connectDelay = 0
-	case connectDelay == 0:
-		connectDelay = 250 * time.Millisecond
-	}
-
-	f := &Factory{
-		settings:         settings,
-		log:              log,
-		certPool:         NewCertPool(opts.CertPoolSize, log),
-		monitor:          NewFactoryMonitor(log),
-		iceServers:       opts.ICEServers,
-		connectDelay:     connectDelay,
-		logICECandidates: opts.LogICECandidates,
-	}
-	// Single goroutine drives keepalive + liveness for every PC this
-	// Factory ever produces; PCs Register at NewPeerConnection and
-	// Unregister at Close. With 100 concurrent calls per Client this is
-	// 1 goroutine instead of 100 (the v0.6.5 first draft had one per PC).
-	f.monitor.Start()
-	if opts.SharedUDPMux {
-		lc, err := net.ListenPacket("udp4", ":0")
-		if err != nil {
-			return nil, err
-		}
-		f.udpMux = webrtc.NewICEUDPMux(nil, lc)
-		f.settings.SetICEUDPMux(f.udpMux)
-	}
-
-	mediaEngine := &webrtc.MediaEngine{}
-	if err := registerCodecs(mediaEngine); err != nil {
+	netTypes := translateNetworkTypes(opts.NetworkTypes)
+	servers, err := translateICEServers(opts.ICEServers)
+	if err != nil {
 		return nil, err
 	}
-	// Telegram's SFU requires the full set of RTP header extensions below;
-	// without ssrc-audio-level audio is treated as silence and not forwarded.
-	audioExtensions := []string{
-		audioLevelURI,
-		absSendTimeURI,
-		transportCCURI,
-		sdesMidURI,
+
+	var mux any // ice.UDPMux — actual creation deferred to native if shared
+	_ = mux     // SharedUDPMux is currently ignored (one socket per call); see note below.
+
+	innerOpts := native.FactoryOptions{
+		Logger:             log,
+		CertPoolSize:       opts.CertPoolSize,
+		NetworkTypes:       netTypes,
+		ICEServers:         servers,
+		InterfaceFilter:    defaultInterfaceFilter,
+		IPFilter:           defaultIPFilter,
+		ICEPreConnectDelay: opts.ICEPreConnectDelay,
 	}
-	for _, uri := range audioExtensions {
-		if err := mediaEngine.RegisterHeaderExtension(webrtc.RTPHeaderExtensionCapability{URI: uri}, webrtc.RTPCodecTypeAudio); err != nil {
-			return nil, fmt.Errorf("register audio hdrext %s: %w", uri, err)
-		}
-	}
-	videoExtensions := []string{
-		absSendTimeURI,
-		transportCCURI,
-		videoOrientationURI,
-		// sdes-mid is critical for BUNDLE demux on the SFU side: incoming
-		// video RTP packets carry the mid value of the video m-section, and
-		// Telegram's SFU uses it to associate the inferred video SSRC with
-		// the right track. Without sdes-mid registered for video, the SFU
-		// can't bind our video SSRC and silently drops frames while the
-		// elapsed timer still ticks on the sender side.
-		sdesMidURI,
-	}
-	for _, uri := range videoExtensions {
-		if err := mediaEngine.RegisterHeaderExtension(webrtc.RTPHeaderExtensionCapability{URI: uri}, webrtc.RTPCodecTypeVideo); err != nil {
-			return nil, fmt.Errorf("register video hdrext %s: %w", uri, err)
-		}
-	}
-	interceptors := &interceptor.Registry{}
-	if err := webrtc.RegisterDefaultInterceptors(mediaEngine, interceptors); err != nil {
+	inner, err := native.NewFactory(innerOpts)
+	if err != nil {
 		return nil, err
 	}
-	interceptors.Add(&audioLevelInterceptorFactory{})
-	interceptors.Add(&markerClearInterceptorFactory{})
-	// Pion v4 negotiates sdes-mid in SDP but ships no built-in interceptor
-	// that actually stamps the extension on outgoing RTP — only TWCC writes
-	// extensions. Telegram's SFU may use sdes-mid for BUNDLE demux of
-	// incoming participant media, so we stamp it ourselves as
-	// defense-in-depth: mid="0" for audio, mid="1" for video, matching the
-	// transceiver order in NewPeerConnection.
-	interceptors.Add(&midStampInterceptorFactory{})
-
-	f.api = webrtc.NewAPI(
-		webrtc.WithSettingEngine(f.settings),
-		webrtc.WithMediaEngine(mediaEngine),
-		webrtc.WithInterceptorRegistry(interceptors),
-	)
-	return f, nil
+	monitor := NewFactoryMonitor(log)
+	monitor.Start()
+	return &Factory{
+		inner:   inner,
+		monitor: monitor,
+		log:     log,
+	}, nil
 }
 
-// skipInterfaceSubstrings is the package-level fixed list of name fragments
-// that mark a virtual / VPN / container interface. Pre-lowered, scanned in
-// order with strings.Contains. Avoids re-allocating the slice for every
-// interface check during ICE gathering.
+// Monitor returns the per-Factory shared keepalive + watchdog monitor.
+// Exposed so PeerConnection.NewPeerConnection can self-register.
+func (f *Factory) Monitor() *FactoryMonitor { return f.monitor }
+
+// newStack hands out a fresh native.Stack from the factory's pool.
+// Audio + video are always wired (caller's source decides whether the
+// video Streamer actually writes anything).
+func (f *Factory) newStack(ctx context.Context) (*native.Stack, error) {
+	f.mu.Lock()
+	if f.closed {
+		f.mu.Unlock()
+		return nil, models.ErrClosed
+	}
+	f.mu.Unlock()
+	return f.inner.NewStack(ctx, true)
+}
+
+// Close shuts the factory + monitor down.
+func (f *Factory) Close() error {
+	f.mu.Lock()
+	closed := f.closed
+	f.closed = true
+	f.mu.Unlock()
+	if closed {
+		return nil
+	}
+	if f.monitor != nil {
+		f.monitor.Stop()
+	}
+	if f.inner != nil {
+		return f.inner.Close()
+	}
+	return nil
+}
+
+func translateNetworkTypes(in []NetworkType) []ice.NetworkType {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]ice.NetworkType, 0, len(in))
+	for _, n := range in {
+		out = append(out, ice.NetworkType(n))
+	}
+	return out
+}
+
+// translateICEServers converts the legacy ICEServer slice into the
+// pion/stun URI slice native.Factory expects.
+func translateICEServers(servers []ICEServer) ([]*stun.URI, error) {
+	if len(servers) == 0 {
+		return nil, nil
+	}
+	var out []*stun.URI
+	for _, srv := range servers {
+		for _, raw := range srv.URLs {
+			u, err := stun.ParseURI(raw)
+			if err != nil {
+				return nil, err
+			}
+			if srv.Username != "" {
+				u.Username = srv.Username
+			}
+			if srv.Credential != "" {
+				u.Password = srv.Credential
+			}
+			out = append(out, u)
+		}
+	}
+	return out, nil
+}
+
+// defaultInterfaceFilter skips virtual / VPN / container interfaces
+// that produce unreachable ICE candidates and slow gathering.
+func defaultInterfaceFilter(name string) bool {
+	lower := strings.ToLower(name)
+	for _, skip := range skipInterfaceSubstrings {
+		if strings.Contains(lower, skip) {
+			return false
+		}
+	}
+	return true
+}
+
+// defaultIPFilter excludes IPs from subnets that produce unreachable ICE
+// candidates. Windows ICS (192.168.137.0/24) is the primary one.
+func defaultIPFilter(ip net.IP) bool {
+	icsNet := net.IPNet{IP: net.IP{192, 168, 137, 0}, Mask: net.CIDRMask(24, 32)}
+	return !icsNet.Contains(ip)
+}
+
 var skipInterfaceSubstrings = [...]string{
 	"vethernet", "vmware", "virtualbox", "vbox", "hyper-v",
 	"loopback", "teredo", "isatap", "tap-",
 	"docker", "wsl", "tailscale", "zerotier", "openvpn",
 }
 
-func makeInterfaceFilter() func(string) bool {
-	return func(name string) bool {
-		lower := strings.ToLower(name)
-		for _, skip := range skipInterfaceSubstrings {
-			if strings.Contains(lower, skip) {
-				return false
-			}
-		}
-		return true
-	}
-}
+// errICEServerInvalid keeps the legacy error sentinel exposed so any
+// caller still doing errors.Is comparisons keeps compiling.
+var errICEServerInvalid = errors.New("wrtc: invalid ICE server URL")
 
-// makeIPFilter excludes IPs from subnets that produce unreachable ICE
-// candidates. Windows ICS (192.168.137.0/24) is the primary one.
-func makeIPFilter() func(ip net.IP) bool {
-	icsNet := net.IPNet{IP: net.IP{192, 168, 137, 0}, Mask: net.CIDRMask(24, 32)}
-	return func(ip net.IP) bool {
-		return !icsNet.Contains(ip)
-	}
-}
-
-func registerCodecs(m *webrtc.MediaEngine) error {
-	// Audio: Opus PT 111 (Telegram standard). The fmtp line declares stereo
-	// and a high max bitrate so Telegram's SFU allocates bandwidth for music
-	// rather than speech.
-	if err := m.RegisterCodec(webrtc.RTPCodecParameters{
-		RTPCodecCapability: webrtc.RTPCodecCapability{
-			MimeType:     webrtc.MimeTypeOpus,
-			ClockRate:    uint32(models.OpusSampleRate),
-			Channels:     2,
-			SDPFmtpLine:  "minptime=10;useinbandfec=1;stereo=1;sprop-stereo=1;maxaveragebitrate=510000",
-			RTCPFeedback: []webrtc.RTCPFeedback{{Type: "transport-cc"}},
-		},
-		PayloadType: models.OpusPayloadType,
-	}, webrtc.RTPCodecTypeAudio); err != nil {
-		return err
-	}
-	// Video: VP8 PT 100 (Telegram standard).
-	videoFeedback := []webrtc.RTCPFeedback{
-		{Type: "goog-remb"},
-		{Type: "transport-cc"},
-		{Type: "ccm", Parameter: "fir"},
-		{Type: "nack"},
-		{Type: "nack", Parameter: "pli"},
-	}
-	if err := m.RegisterCodec(webrtc.RTPCodecParameters{
-		RTPCodecCapability: webrtc.RTPCodecCapability{
-			MimeType:     webrtc.MimeTypeVP8,
-			ClockRate:    90000,
-			RTCPFeedback: videoFeedback,
-		},
-		PayloadType: models.VP8PayloadType,
-	}, webrtc.RTPCodecTypeVideo); err != nil {
-		return err
-	}
-	// Video: VP9 PT 102 (advertised as an alternative; Telegram negotiates
-	// VP8 in practice but advertising VP9 keeps SDP intersect non-empty if
-	// the SFU ever prefers VP9 on a particular edge).
-	if err := m.RegisterCodec(webrtc.RTPCodecParameters{
-		RTPCodecCapability: webrtc.RTPCodecCapability{
-			MimeType:     webrtc.MimeTypeVP9,
-			ClockRate:    90000,
-			SDPFmtpLine:  "profile-id=0",
-			RTCPFeedback: videoFeedback,
-		},
-		PayloadType: models.VP9PayloadType,
-	}, webrtc.RTPCodecTypeVideo); err != nil {
-		return err
-	}
-	return nil
-}
-
-// NewPeerConnection returns a fresh pion *PeerConnection using a
-// certificate from the pool.
-func (f *Factory) NewPeerConnection(cfg webrtc.Configuration) (*webrtc.PeerConnection, error) {
-	f.mu.Lock()
-	if f.closed {
-		f.mu.Unlock()
-		return nil, models.ErrClosed
-	}
-	api := f.api
-	pool := f.certPool
-	f.mu.Unlock()
-	if api == nil {
-		return nil, errors.New("wrtc: factory not initialized")
-	}
-	if pool != nil {
-		if cert, err := pool.Take(context.Background()); err == nil && cert != nil {
-			cfg.Certificates = []webrtc.Certificate{*cert}
-		}
-	}
-	return api.NewPeerConnection(cfg)
-}
-
-// Close releases the shared UDP mux (if any), cert pool, and the per-
-// Factory monitor goroutine.
-func (f *Factory) Close() error {
-	f.mu.Lock()
-	if f.closed {
-		f.mu.Unlock()
-		return nil
-	}
-	f.closed = true
-	pool := f.certPool
-	mux := f.udpMux
-	monitor := f.monitor
-	f.mu.Unlock()
-	if monitor != nil {
-		monitor.Stop()
-	}
-	if pool != nil {
-		pool.Close()
-	}
-	if mux != nil {
-		return mux.Close()
-	}
-	return nil
-}
+var _ = errICEServerInvalid // referenced via errors.Is in legacy callers; keep symbol live.

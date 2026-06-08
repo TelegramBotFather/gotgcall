@@ -23,8 +23,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/pion/webrtc/v4"
-
 	"github.com/annihilatorrrr/gotgcall/instances"
 	"github.com/annihilatorrrr/gotgcall/media"
 	"github.com/annihilatorrrr/gotgcall/models"
@@ -34,16 +32,16 @@ import (
 
 // ICEServer is re-exported so callers can configure STUN/TURN without
 // importing pion directly.
-type ICEServer = webrtc.ICEServer
+type ICEServer = wrtc.ICEServer
 
 // NetworkType is re-exported for WithNetworkTypes.
-type NetworkType = webrtc.NetworkType
+type NetworkType = wrtc.NetworkType
 
 const (
-	NetworkTypeUDP4 = webrtc.NetworkTypeUDP4
-	NetworkTypeUDP6 = webrtc.NetworkTypeUDP6
-	NetworkTypeTCP4 = webrtc.NetworkTypeTCP4
-	NetworkTypeTCP6 = webrtc.NetworkTypeTCP6
+	NetworkTypeUDP4 = wrtc.NetworkTypeUDP4
+	NetworkTypeUDP6 = wrtc.NetworkTypeUDP6
+	NetworkTypeTCP4 = wrtc.NetworkTypeTCP4
+	NetworkTypeTCP6 = wrtc.NetworkTypeTCP6
 )
 
 // --- Re-exports for ergonomics -------------------------------------------------

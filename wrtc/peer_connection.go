@@ -13,8 +13,9 @@ import (
 // callers used during the pion/webrtc PeerConnection era. The wrapper
 // owns no per-call goroutines beyond what the Stack already runs.
 type PeerConnection struct {
-	stack *native.Stack
-	log   *slog.Logger
+	stack   *native.Stack
+	log     *slog.Logger
+	monitor *FactoryMonitor
 
 	onStateChange func(models.ConnState)
 
@@ -31,11 +32,9 @@ func NewPeerConnection(f *Factory, log *slog.Logger) (*PeerConnection, error) {
 	if err != nil {
 		return nil, err
 	}
-	p := &PeerConnection{stack: stack, log: log}
+	p := &PeerConnection{stack: stack, log: log, monitor: f.Monitor()}
 	stack.OnConnectionStateChange(p.forwardState)
-	if monitor := f.Monitor(); monitor != nil {
-		monitor.Register(p)
-	}
+	p.monitor.Register(p)
 	return p, nil
 }
 
@@ -76,8 +75,12 @@ func (p *PeerConnection) OnConnectionStateChange(fn func(models.ConnState)) {
 // State exposes the Stack's current connection state for the monitor.
 func (p *PeerConnection) State() models.ConnState { return p.stack.State() }
 
-// Close tears down the underlying Stack.
+// Close tears down the underlying Stack and unregisters from the
+// Factory monitor. Idempotent — the stack uses sync.Once and the
+// monitor's map delete is a no-op for absent entries, so multiple
+// callers (user code + the monitor's force-close path) are safe.
 func (p *PeerConnection) Close() error {
+	p.monitor.Unregister(p)
 	return p.stack.Close()
 }
 

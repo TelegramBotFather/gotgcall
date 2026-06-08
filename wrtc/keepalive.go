@@ -89,7 +89,8 @@ func (m *FactoryMonitor) Register(pc *PeerConnection) {
 }
 
 // Unregister removes pc from the monitor's working set. Called from
-// PeerConnection.Close.
+// PeerConnection.Close — both user-initiated closes and the monitor's
+// own force-close path go through it, so the entry is always reaped.
 func (m *FactoryMonitor) Unregister(pc *PeerConnection) {
 	if m == nil || pc == nil {
 		return
@@ -148,7 +149,9 @@ func (e *pcMonitorEntry) tick(doKeepalive bool) {
 			e.log.Warn("PC stuck out of Connected, forcing close",
 				slog.String("state", state.String()),
 				slog.Duration("timeout", iceCheckingTimeout))
-			e.checkingNs.Store(-1) // prevent re-firing
+			// pc.Close → monitor.Unregister, so this entry is gone
+			// from the map before the next tick — no re-fire guard
+			// needed.
 			_ = e.pc.Close()
 		}
 		return

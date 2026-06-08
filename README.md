@@ -16,7 +16,19 @@ Use it to:
 
 **No libwebrtc, no cgo, no native build chain.** `CGO_ENABLED=0 go build` produces a single static binary on every supported platform. WebRTC runs on [pion v4](https://github.com/pion/webrtc); `ffmpeg` is invoked as a runtime binary for transcoding only — nothing is linked in.
 
-> **Keywords:** Telegram group call · Telegram voice chat · Telegram video chat · pure Go WebRTC · ntgcalls Go alternative · pytgcalls Go alternative · pion WebRTC Telegram · Telegram music bot Go · Telegram radio bot · Telegram audio streaming · Telegram livestream bot · gogram voice chat · MTProto-Go group call · Opus VP8 RTP Telegram · ICE-CONTROLLED pion · RTMP push Telegram livestream · `phone.GetGroupCallStreamRtmpUrl` · `phone.JoinGroupCall` blob signaling · static binary Telegram bot · `CGO_ENABLED=0` Telegram WebRTC · ffmpeg pipeline streaming · HLS/RTSP/MJPEG to Telegram · YouTube to Telegram voice chat · yt-dlp Telegram bot · shared UDP mux Telegram · scalable Telegram call backend
+<!--
+Keywords (for search indexers, not rendered to readers):
+Telegram group call, Telegram voice chat, Telegram video chat, pure Go WebRTC,
+ntgcalls Go alternative, pytgcalls Go alternative, pion WebRTC Telegram,
+Telegram music bot Go, Telegram radio bot, Telegram audio streaming,
+Telegram livestream bot, gogram voice chat, MTProto-Go group call,
+Opus VP8 RTP Telegram, ICE-CONTROLLED pion, RTMP push Telegram livestream,
+phone.GetGroupCallStreamRtmpUrl, phone.JoinGroupCall blob signaling,
+static binary Telegram bot, CGO_ENABLED=0 Telegram WebRTC,
+ffmpeg pipeline streaming, HLS/RTSP/MJPEG to Telegram,
+YouTube to Telegram voice chat, yt-dlp Telegram bot,
+shared UDP mux Telegram, scalable Telegram call backend.
+-->
 
 ## Status
 

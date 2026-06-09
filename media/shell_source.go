@@ -431,7 +431,7 @@ func (s *MultiShellSource) openParallel(ctx context.Context, audioArgs, videoArg
 	return &Streams{close: closeAll, Audio: audioR, Video: videoR}, nil
 }
 
-func (s *MultiShellSource) spawnLeg(ctx context.Context, bin string, args []string) (*gtio.ShellReader, error) {
+func (*MultiShellSource) spawnLeg(ctx context.Context, bin string, args []string) (*gtio.ShellReader, error) {
 	if bin == "" {
 		bin = ffmpegPath()
 	}

@@ -104,22 +104,22 @@ var (
 type Option func(*config)
 
 type config struct {
-	logger              *slog.Logger
-	ffmpegPath          string
-	iceServers          []ICEServer
-	networkTypes        []NetworkType
-	certPoolSize        int
-	dispatchBuf         int
-	connectTimeout      time.Duration
-	iceDisconnect       time.Duration
-	iceFailed           time.Duration
-	iceKeepalive        time.Duration
-	icePreConnectDelay  time.Duration
-	iceMaxBindingReqs   uint16
-	sharedUDPMux        bool
-	ffmpegStderrLog     bool
-	pionTraceAsDebug    bool
-	logICECandidates    bool
+	logger             *slog.Logger
+	ffmpegPath         string
+	iceServers         []ICEServer
+	networkTypes       []NetworkType
+	certPoolSize       int
+	dispatchBuf        int
+	connectTimeout     time.Duration
+	iceDisconnect      time.Duration
+	iceFailed          time.Duration
+	iceKeepalive       time.Duration
+	icePreConnectDelay time.Duration
+	iceMaxBindingReqs  uint16
+	sharedUDPMux       bool
+	ffmpegStderrLog    bool
+	pionTraceAsDebug   bool
+	logICECandidates   bool
 }
 
 func defaultConfig() config {
@@ -296,7 +296,7 @@ func WithDebugLogs() Option {
 // Debug level while the process is running. Without this, ffmpeg stderr is
 // only surfaced in the final error message (last 512 bytes) when the
 // subprocess crashes — useful for crash diagnosis but useless for "ffmpeg
-// is running but I see no audio" symptoms. Enable for verbose diagnosis.
+// is running, but I see no audio" symptoms. Enable for verbose diagnosis.
 func WithFFmpegStderrLog() Option {
 	return func(c *config) { c.ffmpegStderrLog = true }
 }
@@ -357,7 +357,7 @@ type Client struct {
 	disp               *utils.Dispatcher
 	onStreamEnd        func(chatID int64, t StreamType, d Device, err error)
 	onConnectionChange func(chatID int64, info NetworkInfo)
-	onMediaStateChange func(chatID int64, state MediaState)
+	onUpgrade          func(chatID int64, state MediaState)
 	calls              sync.Map // map[int64]instances.Call
 	createMu           sync.Map // map[int64]*sync.Mutex — gates CreateCall/StartRTMP per chat
 	cfg                config
@@ -503,16 +503,14 @@ func (c *Client) StartRTMP(chatID int64, rtmpURL string) error {
 // example after pion declared ICE failed permanently or the previous
 // SetSource returned "connection closed during setup" — it is reaped
 // here so the caller can immediately create a fresh call instead of
-// being told ErrConnectionExists for a corpse. Callers hold the per-
-// chat create mutex via acquireCreate.
+// being told ErrConnectionExists for a corpse. Callers hold the per-chat create mutex via acquireCreate.
 func (c *Client) callIsLive(chatID int64) bool {
 	v, ok := c.calls.Load(chatID)
 	if !ok {
 		return false
 	}
 	prev := v.(instances.Call)
-	switch prev.NetState() {
-	case models.Failed, models.Closed:
+	if state := prev.NetState(); state == models.Failed || state == models.Closed {
 		c.calls.Delete(chatID)
 		_ = prev.Stop()
 		return false
@@ -655,9 +653,14 @@ func (c *Client) AudioSSRC(chatID int64) (uint32, error) {
 
 // --- Callbacks -----------------------------------------------------------------
 
-// OnStreamEnd registers a callback fired when a track ends (EOF, crash,
-// stop). Called on the dispatcher goroutine so it is safe to re-enter
-// the Client API from within.
+// OnStreamEnd registers a callback fired when a track ends from EOF or
+// ffmpeg crash. Manual Stop / SetSource don't fire — the caller already
+// knows they initiated those.
+//
+// For video+audio sources (vplay) the callback fires twice in fixed
+// order: first StreamType=Video, then StreamType=Audio. Audio-only and
+// video-only sources fire once. Called on the dispatcher goroutine so
+// it is safe to re-enter the Client API from within.
 func (c *Client) OnStreamEnd(fn func(chatID int64, t StreamType, d Device, err error)) {
 	c.cbMu.Lock()
 	c.onStreamEnd = fn
@@ -671,22 +674,25 @@ func (c *Client) OnConnectionChange(fn func(chatID int64, info NetworkInfo)) {
 	c.cbMu.Unlock()
 }
 
-// OnMediaStateChange registers a callback fired whenever the call's
-// outgoing media state (muted / paused / video-stopped) transitions.
+// OnUpgrade registers a callback fired only on *spontaneous* outgoing
+// media-state transitions — ones the library itself initiates without an
+// API call from the caller. User-initiated transitions
+// (SetStreamSources, Stop, Pause, Resume, Mute, Unmute) are silent
+// because the caller already knows they triggered them and can flip the
+// MTProto participant flags in the same code path.
 //
-// Use this to keep the Telegram-side participant flags (settable via
-// phone.editGroupCallParticipant in your MTProto layer) in sync with the
-// library-side streamer state. Most importantly: when /play (audio-only)
-// is followed by /vplay (video) on the SAME call, this fires with
-// state.VideoStopped=false, signaling that you should flip the
-// participant's video_stopped flag MTProto-side. Without that signal,
-// Telegram's SFU may drop the late video even though our RTP is correct.
+// In practice OnUpgrade fires when:
+//   - A video leg ends mid-stream (EOF / ffmpeg crash) — VideoStopped
+//     flips false→true. (Audio-only sources do not fire here because
+//     VideoStopped was already true.)
+//   - The WebRTC PC transitions to Failed/Closed while video was
+//     active — same VideoStopped flip.
 //
-// Mirror of ntgcalls' onUpgrade(MediaState) pattern. Fires on the
-// dispatcher goroutine, safe to re-enter the Client API from within.
-func (c *Client) OnMediaStateChange(fn func(chatID int64, state MediaState)) {
+// Mirror of ntgcalls' onUpgrade(MediaState). Fires on the dispatcher
+// goroutine, safe to re-enter the Client API from within.
+func (c *Client) OnUpgrade(fn func(chatID int64, state MediaState)) {
 	c.cbMu.Lock()
-	c.onMediaStateChange = fn
+	c.onUpgrade = fn
 	c.cbMu.Unlock()
 }
 
@@ -721,9 +727,9 @@ func (c *Client) eventsFor(chatID int64) instances.GroupCallEvents {
 				fn(chatID, info)
 			}
 		},
-		OnMediaStateChange: func(state models.MediaState) {
+		OnUpgrade: func(state models.MediaState) {
 			c.cbMu.RLock()
-			fn := c.onMediaStateChange
+			fn := c.onUpgrade
 			c.cbMu.RUnlock()
 			if fn != nil {
 				fn(chatID, state)

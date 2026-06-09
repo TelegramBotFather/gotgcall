@@ -57,7 +57,7 @@ func buildLocalParamsJSON(ufrag, pwd, fingerprintSHA256 string, audioSSRC, video
 				ID:        models.OpusPayloadType,
 				Name:      "opus",
 				Clockrate: models.OpusSampleRate,
-				Channels:  2,
+				Channels:  models.DefaultChannelCount,
 				Parameters: map[string]string{
 					"minptime":          "10",
 					"useinbandfec":      "1",

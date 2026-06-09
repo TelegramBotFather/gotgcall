@@ -19,10 +19,12 @@ import (
 type GroupCallEvents struct {
 	OnStreamEnd        func(t models.StreamType, d models.Device, err error)
 	OnConnectionChange func(info models.NetworkInfo)
-	// OnMediaStateChange fires when the outgoing media state transitions
-	// (Muted, Paused, or VideoStopped changes). Only the transition fires —
-	// no-op mutations (Mute when already muted) don't trigger.
-	OnMediaStateChange func(state models.MediaState)
+	// OnUpgrade fires only on *spontaneous* outgoing-state transitions —
+	// video leg EOF/crash mid-stream, or PC Failed/Closed while video was
+	// active. User-initiated transitions (SetSource / Pause / Resume /
+	// Mute / Unmute / Stop) do not fire — the caller already knows.
+	// Mirror of ntgcalls' onUpgrade(MediaState) pattern.
+	OnUpgrade func(state models.MediaState)
 }
 
 // GroupCall is the WebRTC call instance for one chat.
@@ -51,6 +53,14 @@ type GroupCall struct {
 	paused        bool
 	muted         bool
 	videoOff      bool
+	// Per-cycle stream-end state. Reset by SetSource / startLocked.
+	// endedOnce ensures only the first leg to EOF fires OnStreamEnd; the
+	// second leg is force-stopped and its EOF suppressed. hadAudio /
+	// hadVideo are captured at cycle-start so the user gets the right
+	// events even after fields are cleared.
+	endedOnce bool
+	hadAudio  bool
+	hadVideo  bool
 }
 
 // NewGroupCall constructs a fresh call. Caller threads pion factory + logger.
@@ -109,7 +119,7 @@ func NewGroupCall(chatID int64, factory *wrtc.Factory, disp *utils.Dispatcher, l
 				gc.mu.Lock()
 				prev := gc.currentStateLocked()
 				gc.stopStreamersLocked()
-				gc.fireMediaStateIfChangedLocked(prev)
+				gc.fireUpgradeIfChangedLocked(prev)
 				gc.mu.Unlock()
 			})
 		}
@@ -217,7 +227,6 @@ func (g *GroupCall) SetSource(ctx context.Context, src media.Source) error {
 	g.switching.Store(true)
 	defer g.switching.Store(false)
 
-	prev := g.currentStateLocked()
 	g.stopStreamersLocked()
 	g.src = src
 	g.resumeMs = 0
@@ -225,6 +234,10 @@ func (g *GroupCall) SetSource(ctx context.Context, src media.Source) error {
 	g.streams = streams
 	g.audioStr = audioStr
 	g.videoStr = videoStr
+	// Arm the per-cycle stream-end guard for the freshly installed pair.
+	g.endedOnce = false
+	g.hadAudio = audioStr != nil
+	g.hadVideo = videoStr != nil
 	paused := g.paused
 	if audioStr != nil {
 		if paused {
@@ -238,8 +251,11 @@ func (g *GroupCall) SetSource(ctx context.Context, src media.Source) error {
 		}
 		videoStr.Start()
 	}
-	g.fireMediaStateIfChangedLocked(prev)
 	g.mu.Unlock()
+	// Intentionally no OnUpgrade fire here — SetSource is user-initiated,
+	// the caller already knows they're switching to a video source (same
+	// principle as Stop). Spontaneous transitions (video leg EOF, ICE
+	// failure) still fire.
 	return nil
 }
 
@@ -356,6 +372,12 @@ func (g *GroupCall) startLocked(ctx context.Context) error {
 		g.streams = nil
 		return fmt.Errorf("%w: source has no playable audio or video stream", models.ErrFile)
 	}
+	// Arm the per-cycle stream-end guard. We hold g.mu, so any EOF
+	// dispatched from a streamer that EOF'd between Start and here will
+	// block at the closure's g.mu.Lock() until this returns.
+	g.endedOnce = false
+	g.hadAudio = audioOK
+	g.hadVideo = videoOK
 	return nil
 }
 
@@ -376,8 +398,15 @@ func (g *GroupCall) stopStreamersLocked() {
 
 // handleStreamerEnd is the per-streamer onEnd callback. Receives the
 // streamer pointer captured at construction so the dispatched cleanup
-// can verify the ended streamer is still the current one before
-// nil-ing the field (concurrent SetSource may have already replaced it).
+// can verify the ended streamer is still the current one before firing
+// (concurrent SetSource may have already replaced it).
+//
+// For a video+audio source, the first leg to EOF wins the right to fire.
+// The sibling streamer is force-stopped and its own EOF is suppressed by
+// the endedOnce guard. The user gets two OnStreamEnd events in fixed
+// order — Video then Audio — regardless of which leg ended first.
+// Audio-only sources fire a single Audio event; video-only sources fire
+// a single Video event.
 func (g *GroupCall) handleStreamerEnd(t models.StreamType, d models.Device, err error, str *media.Streamer) {
 	closed := g.closed.Load()
 	switching := g.switching.Load()
@@ -395,28 +424,60 @@ func (g *GroupCall) handleStreamerEnd(t models.StreamType, d models.Device, err 
 			return
 		}
 		g.mu.Lock()
-		prev := g.currentStateLocked()
-		switch t {
-		case models.Audio:
-			if g.audioStr == str {
-				g.audioStr = nil
-			}
-		case models.Video:
-			if g.videoStr == str {
-				g.videoStr = nil
-			}
+		// Stale dispatch: SetSource replaced this streamer with a
+		// different one before our closure ran. We detect that by the
+		// field being non-nil but pointing at a different Streamer.
+		// (PC-Failed cleanup nils the field externally — that path
+		// should still fire, so we don't suppress on plain nil.)
+		isStale := (t == models.Audio && g.audioStr != nil && g.audioStr != str) ||
+			(t == models.Video && g.videoStr != nil && g.videoStr != str)
+		if isStale || g.endedOnce {
+			g.mu.Unlock()
+			return
 		}
-		g.fireMediaStateIfChangedLocked(prev)
+		g.endedOnce = true
+		hadAudio := g.hadAudio
+		hadVideo := g.hadVideo
+		// Capture the sibling streamer (the one that did NOT end). The
+		// streamer that ended naturally needs no Stop call.
+		var siblingAudio, siblingVideo *media.Streamer
+		if t == models.Video {
+			siblingAudio = g.audioStr
+		} else {
+			siblingVideo = g.videoStr
+		}
+		prev := g.currentStateLocked()
+		g.audioStr = nil
+		g.videoStr = nil
+		g.fireUpgradeIfChangedLocked(prev)
 		fn := g.ev.OnStreamEnd
 		g.mu.Unlock()
-		if fn != nil {
-			fn(t, d, err)
+
+		// Stop the sibling outside the lock. Streamer.Stop blocks until
+		// its run goroutine exits; that exit fires onEnd which dispatches
+		// a handleStreamerEnd whose closure sees endedOnce=true (or
+		// isCurrent=false because we cleared the field) and returns.
+		if siblingVideo != nil {
+			siblingVideo.Stop()
+		}
+		if siblingAudio != nil {
+			siblingAudio.Stop()
+		}
+
+		if fn == nil {
+			return
+		}
+		if hadVideo {
+			fn(models.Video, models.Camera, err)
+		}
+		if hadAudio {
+			fn(models.Audio, models.Microphone, err)
 		}
 	})
 }
 
-// currentStateLocked computes the MediaState a hypothetical OnMediaState
-// change callback would report right now. Caller must hold g.mu (read or
+// currentStateLocked computes the MediaState a hypothetical OnUpgrade
+// callback would report right now. Caller must hold g.mu (read or
 // write — read fields only).
 func (g *GroupCall) currentStateLocked() models.MediaState {
 	return models.MediaState{
@@ -426,21 +487,25 @@ func (g *GroupCall) currentStateLocked() models.MediaState {
 	}
 }
 
-// fireMediaStateIfChangedLocked submits an OnMediaStateChange dispatch
-// only if the current state differs from prev. Caller must hold g.mu.
-// Dispatch is async via the shared dispatcher so callers can safely
-// re-enter Client API from inside the callback.
-func (g *GroupCall) fireMediaStateIfChangedLocked(prev models.MediaState) {
+// fireUpgradeIfChangedLocked submits an OnUpgrade dispatch only if the
+// current state differs from prev. Caller must hold g.mu. Dispatch is
+// async via the shared dispatcher so callers can safely re-enter Client
+// API from inside the callback.
+func (g *GroupCall) fireUpgradeIfChangedLocked(prev models.MediaState) {
 	cur := g.currentStateLocked()
 	if prev == cur {
 		return
 	}
-	if g.disp == nil || g.ev.OnMediaStateChange == nil {
+	if g.disp == nil || g.ev.OnUpgrade == nil {
 		return
 	}
-	g.disp.Submit(func() { g.ev.OnMediaStateChange(cur) })
+	g.disp.Submit(func() { g.ev.OnUpgrade(cur) })
 }
 
+// Pause / Resume / Mute / Unmute are user-initiated transitions and do
+// NOT fire OnUpgrade — the caller already knows they triggered the
+// change. OnUpgrade is reserved for spontaneous transitions (video leg
+// EOF mid-stream, ICE failure).
 func (g *GroupCall) Pause() (bool, error) {
 	if g.closed.Load() {
 		return false, models.ErrClosed
@@ -450,7 +515,6 @@ func (g *GroupCall) Pause() (bool, error) {
 	if g.paused {
 		return false, nil
 	}
-	prev := g.currentStateLocked()
 	g.paused = true
 	// Block the pull loop on the streamer's gate without killing ffmpeg.
 	// The OS pipe absorbs the next ~1s of frames; Resume wakes the loop.
@@ -460,7 +524,6 @@ func (g *GroupCall) Pause() (bool, error) {
 	if g.videoStr != nil {
 		g.videoStr.SetPaused(true)
 	}
-	g.fireMediaStateIfChangedLocked(prev)
 	return true, nil
 }
 
@@ -473,7 +536,6 @@ func (g *GroupCall) Resume() (bool, error) {
 	if !g.paused {
 		return false, nil
 	}
-	prev := g.currentStateLocked()
 	g.paused = false
 	// If streamers exist (gate-paused), just unblock them. Otherwise, the
 	// source was never started (e.g. paused before SetStreamSources) — start now.
@@ -484,16 +546,12 @@ func (g *GroupCall) Resume() (bool, error) {
 		if g.videoStr != nil {
 			g.videoStr.SetPaused(false)
 		}
-		g.fireMediaStateIfChangedLocked(prev)
 		return true, nil
 	}
 	if g.src == nil {
-		g.fireMediaStateIfChangedLocked(prev)
 		return true, nil
 	}
-	err := g.startLocked(context.Background())
-	g.fireMediaStateIfChangedLocked(prev)
-	return true, err
+	return true, g.startLocked(context.Background())
 }
 
 func (g *GroupCall) Mute() (bool, error) {
@@ -505,12 +563,10 @@ func (g *GroupCall) Mute() (bool, error) {
 	if g.muted {
 		return false, nil
 	}
-	prev := g.currentStateLocked()
 	g.muted = true
 	if g.audioStr != nil {
 		g.audioStr.SetMuted(true)
 	}
-	g.fireMediaStateIfChangedLocked(prev)
 	return true, nil
 }
 
@@ -523,12 +579,10 @@ func (g *GroupCall) Unmute() (bool, error) {
 	if !g.muted {
 		return false, nil
 	}
-	prev := g.currentStateLocked()
 	g.muted = false
 	if g.audioStr != nil {
 		g.audioStr.SetMuted(false)
 	}
-	g.fireMediaStateIfChangedLocked(prev)
 	return true, nil
 }
 
@@ -537,7 +591,6 @@ func (g *GroupCall) Stop() error {
 		return nil
 	}
 	g.mu.Lock()
-	prev := g.currentStateLocked()
 	g.stopStreamersLocked()
 	g.src = nil
 	g.srcEncOpt = media.EncodeOptions{}
@@ -545,8 +598,12 @@ func (g *GroupCall) Stop() error {
 	g.paused = false
 	g.muted = false
 	g.videoOff = false
-	g.fireMediaStateIfChangedLocked(prev)
 	g.mu.Unlock()
+	// Intentionally no fireUpgradeIfChangedLocked here — Stop is
+	// user-initiated, the caller already knows the call is gone (same
+	// principle as OnStreamEnd being skipped on Stop). Firing
+	// videoStopped=true after a vplay→Stop would be inconsistent with
+	// play→Stop (which fires nothing because the state never changed).
 	return g.pc.Close()
 }
 

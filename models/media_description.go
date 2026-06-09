@@ -42,5 +42,4 @@ const (
 	OpusFrameDurationMs = 20
 	OpusPayloadType     = 111
 	VP8PayloadType      = 100
-	VP9PayloadType      = 102
 )

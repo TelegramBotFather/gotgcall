@@ -70,7 +70,7 @@ func main() {
 	if err = tg.Connect(); err != nil {
 		log.Fatalf("connect: %v", err)
 	}
-	defer tg.Disconnect() //nolint:errcheck
+	defer tg.Disconnect()
 
 	// --- gotgcall (WebRTC) ----------------------------------------------------
 	client, err := gotgcall.New(
@@ -83,10 +83,11 @@ func main() {
 	}
 	defer client.Close()
 
-	// Stream lifecycle events. err == nil for clean EOF/Stop, non-nil for
-	// ffmpeg crash or unexpected end. In a music bot, this is where you call
-	// SetStreamSources with the next queue entry, or Stop+Leave if the queue
-	// is empty.
+	// Stream lifecycle events. Fires on natural EOF (err == nil) or ffmpeg
+	// crash (err != nil). Manual Stop / SetSource don't fire — you already
+	// know you initiated those. For video+audio sources the callback fires
+	// twice: first Video, then Audio. In a music bot, this is where you
+	// advance the queue (typically only on the Audio event).
 	client.OnStreamEnd(func(chat int64, t gotgcall.StreamType, d gotgcall.Device, err error) {
 		log.Printf("stream end chat=%d type=%s device=%s err=%v", chat, t, d, err)
 	})
@@ -98,22 +99,22 @@ func main() {
 		log.Printf("conn chat=%d state=%s", chat, info.State)
 	})
 
-	// Outgoing media-state transitions (muted / paused / video-stopped).
-	// Wire this into your MTProto layer to flip the call participant's
-	// video_stopped / muted flags via phone.EditGroupCallParticipant —
-	// without it, an audio-only /play followed by a /vplay on the SAME
-	// call may have its video silently dropped by Telegram's SFU because
-	// the participant was never marked as a video sender.
-	client.OnMediaStateChange(func(chat int64, state gotgcall.MediaState) {
-		log.Printf("media state chat=%d muted=%v paused=%v video_stopped=%v",
+	// Spontaneous outgoing-state transitions only — fires when a video
+	// leg dies mid-stream (EOF/ffmpeg crash) or when ICE Failed/Closed
+	// while video was active. User-initiated changes (SetStreamSources,
+	// Pause, Mute, Stop, …) DON'T fire because your bot code already
+	// knows it triggered them — flip your MTProto participant flags
+	// (phone.EditGroupCallParticipant) directly in those command
+	// handlers, not in this callback.
+	client.OnUpgrade(func(chat int64, state gotgcall.MediaState) {
+		log.Printf("upgrade chat=%d muted=%v paused=%v video_stopped=%v",
 			chat, state.Muted, state.Paused, state.VideoStopped)
-		// In a real bot:
+		// Spontaneous transition (video died). Sync MTProto so other
+		// participants see the participant's video_stopped flip:
 		//   tg.PhoneEditGroupCallParticipant(&telegram.PhoneEditGroupCallParticipantParams{
 		//       Call:          inputCall,
 		//       Participant:   &telegram.InputPeerSelf{},
-		//       Muted:         state.Muted,
 		//       VideoStopped:  state.VideoStopped,
-		//       VideoPaused:   state.Paused,
 		//   })
 	})
 
@@ -144,43 +145,37 @@ func main() {
 		}
 		return nil
 	})
-
+	// Steps in serial MUST you follow to start the VC: CreateCall -> Connect -> SetStreamSources
 	// 1. Resolve the active group call for the chat.
 	inputCall, err := resolveActiveCall(tg, cfg.ChatID)
 	if err != nil {
 		log.Fatalf("resolve call: %v", err)
 	}
-
 	// 2. Build local-side params.
 	localParams, err := client.CreateCall(cfg.ChatID)
 	if err != nil {
 		log.Fatalf("create call: %v", err)
 	}
 	log.Printf("local params: %d bytes", len(localParams))
-
 	// 3. Telegram MTProto join. The response contains the remote answer JSON.
 	remoteParams, err := joinAndGetRemoteParams(tg, inputCall, localParams)
 	if err != nil {
 		log.Fatalf("join + extract: %v", err)
 	}
-
 	// 4. Finish WebRTC handshake. ICE/DTLS runs async after this returns.
 	if err = client.Connect(cfg.ChatID, remoteParams); err != nil {
 		log.Fatalf("client.Connect: %v", err)
 	}
-
 	// 5. Stream the source. FromFile/FromURL handle local files, HTTP, HLS,
 	//    RTMP, RTSP — anything ffmpeg can decode.
 	src := buildSource(source)
 	if err = client.SetStreamSources(cfg.ChatID, src); err != nil {
 		log.Fatalf("set source: %v", err)
 	}
-
 	log.Println("streaming; press Ctrl+C to stop")
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
 	<-stop
-
 	// 6. Tear down. Telegram infers the leaving participant from the joined
 	//    MTProto session — Source = 0 works fine for self-leave.
 	_ = client.Stop(cfg.ChatID)
@@ -231,8 +226,8 @@ func envOr(k, def string) string {
 //   - "shellv:<cmd>"           → FromShell (one custom ffmpeg leg, video)
 //   - "shells:<audio>|<video>" → FromShells (two custom legs; either side may be empty)
 //   - "http(s)://", "rtmp://", "rtsp://"
-//                              → FromURL (lib builds ffmpeg argv with HLS/HTTP
-//                                  flags — reconnect, timeout, user-agent)
+//     → FromURL (lib builds ffmpeg argv with HLS/HTTP
+//     flags — reconnect, timeout, user-agent)
 //   - anything else            → FromFile (lib builds ffmpeg argv with fast-probe flags)
 //
 // FromFile / FromURL are the convenience path: pass EncodeOptions, the library
@@ -247,10 +242,10 @@ func buildSource(arg string) gotgcall.Source {
 		audio, video, _ := strings.Cut(rest, "|")
 		return gotgcall.FromShells(audio, video)
 	case strings.HasPrefix(arg, "shell:"):
-		// Audio-only custom ffmpeg pipeline. Auto-filled with libopus / ogg / pipe:1.
+		// Audio-only custom ffmpeg pipeline. Autofilled with libopus / ogg / pipe:1.
 		return gotgcall.FromShell(strings.TrimPrefix(arg, "shell:"), gotgcall.TrackAudio)
 	case strings.HasPrefix(arg, "shellv:"):
-		// Video-only custom ffmpeg pipeline. Auto-filled with libvpx / ivf / pipe:1.
+		// Video-only custom ffmpeg pipeline. Autofilled with libvpx / ivf / pipe:1.
 		return gotgcall.FromShell(strings.TrimPrefix(arg, "shellv:"), gotgcall.TrackVideo)
 	case strings.HasPrefix(arg, "http://"), strings.HasPrefix(arg, "https://"),
 		strings.HasPrefix(arg, "rtmp://"), strings.HasPrefix(arg, "rtsp://"):

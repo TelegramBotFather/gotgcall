@@ -452,8 +452,7 @@ func (s *Stack) drainInbound() {
 		if err == nil {
 			continue
 		}
-		var netErr net.Error
-		if errors.As(err, &netErr) && netErr.Timeout() {
+		if netErr, ok := errors.AsType[net.Error](err); ok && netErr.Timeout() {
 			continue
 		}
 		// Anything else (Close, EOF, agent-shutdown) is terminal.

@@ -129,10 +129,10 @@ client.OnStreamEnd(func(chat int64, t gotgcall.StreamType, d gotgcall.Device, er
 client.OnConnectionChange(func(chat int64, info gotgcall.NetworkInfo) {
     log.Printf("conn state: %s", info.State)
 })
-client.OnMediaStateChange(func(chat int64, state gotgcall.MediaState) {
-    // Mirror to phone.EditGroupCallParticipant so Telegram knows the
-    // bot just toggled video/mute/pause. Required for /play → /vplay
-    // to actually show video to other participants.
+client.OnUpgrade(func(chat int64, state gotgcall.MediaState) {
+    // Spontaneous transitions only — video leg died mid-stream or ICE
+    // failed while video was active. User-initiated SetSource/Pause/
+    // Mute/Stop are silent (your code already knows it triggered them).
 })
 
 // 1. Local-side JSON.
@@ -401,20 +401,22 @@ RTMP mode:
 
 ```go
 client.OnStreamEnd(func(chat int64, t StreamType, d Device, err error) {
-    // Fires on natural EOF, ffmpeg crash, Stop. err == nil for clean EOF/Stop.
+    // Fires on natural EOF (err == nil) or ffmpeg crash (err != nil).
+    // Manual Stop / SetSource don't fire — the caller already knows.
+    // For video+audio sources fires twice: first Video, then Audio.
 })
 
 client.OnConnectionChange(func(chat int64, info NetworkInfo) {
     // info.State: Connecting | Connected | Disconnected | Failed | Closed | Timeout
 })
 
-client.OnMediaStateChange(func(chat int64, state MediaState) {
-    // Fires on every Muted / Paused / VideoStopped transition. Wire to
-    // your MTProto layer's phone.EditGroupCallParticipant so Telegram
-    // mirrors the change for other participants. Critical for the
-    // /play → /vplay swap: without flipping VideoStopped=false on the
-    // server side, Telegram's SFU silently drops the late video even
-    // though our RTP is correct.
+client.OnUpgrade(func(chat int64, state MediaState) {
+    // Mirror of ntgcalls' onUpgrade(MediaState). Fires ONLY on
+    // spontaneous transitions: a video leg ending mid-stream (EOF /
+    // ffmpeg crash) or the WebRTC PC reaching Failed/Closed while video
+    // was active. User-initiated transitions (SetStreamSources, Stop,
+    // Pause, Resume, Mute, Unmute) are silent — flip your MTProto
+    // participant flags directly in those command handlers, not here.
 })
 ```
 
@@ -441,7 +443,7 @@ tg.AddRawHandler(&telegram.UpdateGroupCallParticipants{}, func(u telegram.Update
 })
 ```
 
-There is no `OnUpgrade` / `NotifyUpgrade` API by design — out of scope for a blob-only library.
+The `OnUpgrade(MediaState)` callback fires only for **outgoing** state changes the library initiates (Mute / Pause / video stream end). Server-side mute / video-stop from Telegram is delivered only via your MTProto `UpdateGroupCallParticipants` handler — gotgcall stays out of MTProto by design.
 
 ## Errors
 
@@ -480,7 +482,7 @@ The library is deliberately frugal with goroutines. Inventory:
 | Goroutine | Where | Purpose |
 | --- | --- | --- |
 | `monitor.run` | `wrtc/keepalive.go` | One timer loop that paces video keepalive padding for every active PC and force-closes any PC stuck out of Connected past 15 s. |
-| `dispatcher.loop` | `utils/synccallback.go` | Serializes every callback (`OnStreamEnd`, `OnConnectionChange`, `OnMediaStateChange`) so user code can safely re-enter the API. |
+| `dispatcher.loop` | `utils/synccallback.go` | Serializes every callback (`OnStreamEnd`, `OnConnectionChange`, `OnUpgrade`) so user code can safely re-enter the API. |
 | `certpool.refill` | `wrtc/native/certpool.go` | Pre-generates ECDSA-P256 DTLS certs so `CreateCall` never blocks on keygen during bursts. Skipped entirely when `WithDTLSCertPool(0)`. Sleeps on a buffered channel send when the pool is full. |
 
 **Per-call (proportional to live call count):**

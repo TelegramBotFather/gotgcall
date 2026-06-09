@@ -42,7 +42,7 @@ const (
 //     reference; pion/rtp marshals it during the subsequent SRTP write,
 //     so the buffer is in-flight until WriteRTP returns).
 //   - The mutex is per-Track. Audio and video Tracks have independent
-//     mutexes; the shared SRTP context further down still serialises
+//     mutexes; the shared SRTP context further down still serializes
 //     encryption across both via Stack.srtpWriteMu.
 type Track struct {
 	packetizer  rtp.Packetizer
@@ -105,7 +105,7 @@ func NewTrack(kind Kind, ssrc uint32) *Track {
 // AttachWriteStream binds the SRTP write stream so subsequent
 // WriteSample calls actually go out on the wire. Before this, the
 // packetiser is built and waiting; samples written pre-attachment
-// silently no-op (matches old TrackLocalStaticSample behaviour
+// silently no-op (matches old TrackLocalStaticSample behavior
 // pre-PeerConnection-Connected).
 func (t *Track) AttachWriteStream(ws RTPWriter) {
 	t.writeStream.Store(&writerSlot{w: ws})

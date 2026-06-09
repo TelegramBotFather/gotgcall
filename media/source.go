@@ -6,6 +6,8 @@ import (
 	"log/slog"
 	"sync/atomic"
 	"time"
+
+	"github.com/annihilatorrrr/gotgcall/models"
 )
 
 // Track is a bitmask selecting which tracks a Source provides.
@@ -87,7 +89,7 @@ func (o EncodeOptions) withDefaults() EncodeOptions {
 		o.AudioBitrateKbps = 128
 	}
 	if o.AudioChannels == 0 {
-		o.AudioChannels = 2
+		o.AudioChannels = models.DefaultChannelCount
 	}
 	if o.Tracks == 0 {
 		o.Tracks = TrackAudio

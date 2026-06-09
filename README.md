@@ -1,20 +1,18 @@
-# gotgcall — Pure-Go Telegram Group Call & Voice Chat Streaming Library
+<h1 align="center">gotgcall</h1>
 
-[![Go Reference](https://pkg.go.dev/badge/github.com/annihilatorrrr/gotgcall.svg)](https://pkg.go.dev/github.com/annihilatorrrr/gotgcall)
-[![Go Report Card](https://goreportcard.com/badge/github.com/annihilatorrrr/gotgcall)](https://goreportcard.com/report/github.com/annihilatorrrr/gotgcall)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![CGO-free](https://img.shields.io/badge/cgo-disabled-brightgreen)](#why-pure-go)
+<p align="center">
+  <b>Pure-Go Telegram Group Call & Voice Chat streaming library</b><br>
+  <sub>The drop-in alternative to <a href="https://github.com/pytgcalls/ntgcalls">ntgcalls</a> / <a href="https://github.com/pytgcalls/pytgcalls">pytgcalls</a> — built for Go music bots, livestream bots, and broadcast tooling.</sub>
+</p>
 
-**gotgcall** is a pure-Go library for streaming audio and video into **Telegram group calls** (voice chats and video chats). It is a **drop-in alternative to [ntgcalls](https://github.com/pytgcalls/ntgcalls) / [pytgcalls](https://github.com/pytgcalls/pytgcalls)** built for Go music bots, livestream bots, and broadcast tooling.
-
-Use it to:
-
-- Build a **Telegram music bot in Go** that joins a voice chat and plays MP3/FLAC/M4A/Opus/HLS or any audio.
-- Stream a **live video broadcast** (mp4/mkv/webm/RTMP/RTSP) into a Telegram group call.
-- Push a "go live" RTMP broadcast to a channel via `phone.GetGroupCallStreamRtmpUrl`.
-- Wrap any ffmpeg pipeline as a streaming source — atempo, scaling, hardware encoders, atomic source switches.
-
-**No libwebrtc, no cgo, no native build chain.** `CGO_ENABLED=0 go build` produces a single static binary on every supported platform. WebRTC runs on [pion v4](https://github.com/pion/webrtc); `ffmpeg` is invoked as a runtime binary for transcoding only — nothing is linked in.
+<p align="center">
+  <a href="https://pkg.go.dev/github.com/annihilatorrrr/gotgcall"><img src="https://pkg.go.dev/badge/github.com/annihilatorrrr/gotgcall.svg" alt="Go Reference"></a>
+  <a href="https://goreportcard.com/report/github.com/annihilatorrrr/gotgcall"><img src="https://goreportcard.com/badge/github.com/annihilatorrrr/gotgcall" alt="Go Report Card"></a>
+  <a href="https://app.deepsource.com/gh/annihilatorrrr/gotgcall/"><img src="https://app.deepsource.com/gh/annihilatorrrr/gotgcall.svg/?label=active+issues&show_trend=true&token=M2OsBAzzJt_7f73N5Co3gz9I" alt="DeepSource"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-yellow.svg" alt="License: MIT"></a>
+  <a href="#why-pure-go"><img src="https://img.shields.io/badge/cgo-disabled-brightgreen" alt="CGO-free"></a>
+  <a href="#performance-vs-ntgcalls"><img src="https://img.shields.io/badge/pion-v4-blueviolet" alt="pion v4"></a>
+</p>
 
 <!--
 Keywords (for search indexers, not rendered to readers):
@@ -30,41 +28,56 @@ YouTube to Telegram voice chat, yt-dlp Telegram bot,
 shared UDP mux Telegram, scalable Telegram call backend.
 -->
 
-## Status
+```go
+client, _ := gotgcall.New()
+defer client.Close()
 
-Work in progress. Built for my own bots; the API is intentionally close to ntgcalls so existing code translates with minimal change.
+localParams, _ := client.CreateCall(chatID)
+remoteParams   := joinViaYourMTProto(localParams)  // gogram / your MTProto stack
+client.Connect(chatID, remoteParams)
+client.SetStreamSources(chatID, gotgcall.FromFile("song.mp3", gotgcall.EncodeOptions{}))
+```
 
-## Contents
+That's a working voice-chat playback bot. Everything else in this README is options on top.
 
-- [Install](#install)
-- [Architecture at a glance](#architecture-at-a-glance)
-- [Quick start](#quick-start)
-- [Sources](#sources)
-  - [`FromFile` / `FromURL`](#fromfile--fromurl)
-  - [`FromShell` — single custom ffmpeg leg](#fromshell--single-custom-ffmpeg-leg)
-  - [`FromShells` — dual ffmpeg legs](#fromshells--dual-ffmpeg-legs)
-  - [`EncodeOptions`](#encodeoptions)
-- [Client options](#client-options)
-  - [Enabling debug logs](#enabling-debug-logs)
-  - [UDP mux & scaling](#udp-mux--scaling)
-- [Lifecycle](#lifecycle)
-  - [WebRTC mode](#webrtc-mode)
-  - [RTMP mode](#rtmp-mode)
-- [Pause / Resume / Mute](#pause--resume--mute)
-- [Callbacks](#callbacks)
-- [Server-side media-state changes](#server-side-media-state-changes-admin-mute-video-off)
-- [Errors](#errors)
-- [Concurrency model](#concurrency-model)
-- [Goroutine budget](#goroutine-budget)
-- [Networking](#networking)
-- [Performance tuning](#performance-tuning)
-- [A/V sync](#av-sync)
-- [Pitfalls](#pitfalls)
-- [Performance vs ntgcalls](#performance-vs-ntgcalls)
-- [Why pure Go](#why-pure-go)
-- [FAQ](#faq)
-- [See also](#see-also)
-- [License](#license)
+## Highlights
+
+- **Single static binary.** `CGO_ENABLED=0 go build` → `scp` → run. No libwebrtc, no glibc, no C++ toolchain — `ffmpeg` is the only runtime dependency.
+- **Native pion stack.** Built on `pion/ice + dtls + srtp + rtp` directly — no `pion/webrtc.PeerConnection`, no SDP, no role-conflict 487 storm. Connects in tens of milliseconds.
+- **Blob-only signalling.** The library never imports `gogram` or any MTProto code. Use any MTProto Go client you like.
+- **ntgcalls-shaped API.** `CreateCall` / `Connect` / `SetStreamSources` / `Pause` / `Resume` / `Mute` / `Stop` — existing bot code translates line-for-line.
+- **Three source modes.** `FromFile`, `FromURL`, `FromShell` — anything ffmpeg can decode is fair game (HLS, RTSP, RTMP, MJPEG, screen capture, …).
+- **WebRTC + RTMP push.** Group voice/video chats *and* "go live" RTMP broadcasts via one client.
+- **Scales to tens of thousands of calls** per process with `WithSharedUDPMux` + raised FD limits.
+
+## At a glance
+
+| | |
+| --- | --- |
+| **Language** | Pure Go (`CGO_ENABLED=0`) |
+| **Min Go version** | 1.26 |
+| **WebRTC stack** | [pion v4](https://github.com/pion/webrtc) — native composition (no `PeerConnection`) |
+| **Codecs** | Opus (audio, PT 111) · VP8 (video, PT 100) |
+| **ICE role** | CONTROLLED — Telegram is always CONTROLLING |
+| **Signalling** | Blob JSON — bring your own MTProto layer |
+| **Runtime dep** | `ffmpeg` on `PATH` (or `WithFFmpegPath`) |
+| **Modes** | WebRTC group call · RTMP livestream push |
+| **License** | MIT |
+
+> **Status — work in progress.** Built for my own bots; the API is intentionally close to ntgcalls so existing code translates with minimal change. Breaking changes are tagged in releases.
+
+<details>
+<summary><b>Table of contents</b></summary>
+
+- [Install](#install) · [Architecture](#architecture-at-a-glance) · [Quick start](#quick-start)
+- **Sources** — [`FromFile` / `FromURL`](#fromfile--fromurl) · [`FromShell`](#fromshell--single-custom-ffmpeg-leg) ([audio recipes](#audio-recipes) · [video recipes](#video-recipes)) · [`FromShells`](#fromshells--dual-ffmpeg-legs) ([dual-leg recipes](#dual-leg-recipes)) · [Gotchas](#shell-source-gotchas) · [`EncodeOptions`](#encodeoptions)
+- **Client** — [Options](#client-options) · [Debug logs](#enabling-debug-logs) · [UDP mux & scaling](#udp-mux--scaling)
+- **Lifecycle** — [WebRTC mode](#webrtc-mode) · [RTMP mode](#rtmp-mode) · [Pause / Resume / Mute](#pause--resume--mute) · [Callbacks](#callbacks) · [Server-side state changes](#server-side-media-state-changes-admin-mute-video-off)
+- **Reference** — [Errors](#errors) · [Concurrency model](#concurrency-model) · [Goroutine budget](#goroutine-budget) · [Networking](#networking) · [A/V sync](#av-sync) · [Pitfalls](#pitfalls)
+- **Performance** — [Tuning](#performance-tuning) · [Memory](#memory-usage) · [Scaling ballparks](#concurrency--scaling-ballparks) · [vs ntgcalls](#performance-vs-ntgcalls)
+- [Why pure Go](#why-pure-go) · [FAQ](#faq) · [See also](#see-also) · [License](#license)
+
+</details>
 
 ## Install
 
@@ -87,7 +100,7 @@ Requires Go 1.26+ (uses `errors.AsType[T]` and a few stdlib features added in 1.
                             ▼           ▼
                    ┌──────────────┐  ┌──────────────┐
                    │  GroupCall   │  │   RTMPCall   │  per-chat call instance
-                   │  (WebRTC)    │  │  (FFmpeg→RTMP│
+                   │  (WebRTC)    │  │ (ffmpeg→RTMP)│
                    └──────────────┘  └──────────────┘
                             │              │
                             │              └── single ffmpeg push to Telegram's RTMP URL
@@ -189,40 +202,170 @@ Both `FromFile` and `FromURL` return seekable sources. `Pause` records the elaps
 ### `FromShell` — single custom ffmpeg leg
 
 ```go
-gotgcall.FromShell("ffmpeg -i thing.mp3", gotgcall.TrackAudio)
-```
-
-`FromShell` parses the cmdline as a shell-like argv (handles double-quoted args, plus `\"` and `\\` escape sequences for filenames containing literal `"` or `\` — e.g. a Telegram audio titled `(From "Foo")` that would otherwise slice the path mid-string when the embedded quote toggled the quote state) and spawns it **directly via `exec`**, NOT via `/bin/sh`. Shell metacharacters in filenames can't inject commands; use `%q` for filenames!
-
-Missing essentials are filled in automatically:
-
-- Input-side (always on): fast-start probing + `-err_detect ignore_err` before `-i`.
-- Output-side (audio): `-c:a libopus`, `-application audio`, `-frame_duration 20`, `-page_duration 20000`, `-mapping_family 0`, `-ar 48000`, `-ac 2`, `-f ogg`, `pipe:1`.
-- Output-side (video): `-c:v libvpx`, `-deadline realtime`, `-f ivf`, `pipe:1`.
-
-So the minimum command works:
-
-```go
 gotgcall.FromShell(`ffmpeg -i "song.mp3"`, gotgcall.TrackAudio)
 ```
 
-…and is equivalent to the fully-spelled-out form:
+`FromShell` parses the cmdline as a shell-like argv (handles double-quoted args, plus `\"` and `\\` escape sequences for filenames containing literal `"` or `\` — e.g. a Telegram audio titled `(From "Foo")` that would otherwise slice the path mid-string when the embedded quote toggled the quote state) and spawns it **directly via `exec`**, NOT via `/bin/sh`. Shell metacharacters in filenames can't inject commands; use `%q` for filenames.
+
+**Auto-injected if missing** (so the minimal command above just works):
+
+| Position | Flags |
+| --- | --- |
+| Before `-i` | `-analyzeduration 0 -probesize 64k -err_detect ignore_err` |
+| Audio out  | `-c:a libopus -application audio -frame_duration 20 -page_duration 20000 -mapping_family 0 -ar 48000 -ac 2 -f ogg` |
+| Video out  | `-c:v libvpx -deadline realtime -f ivf` |
+| Last token | `pipe:1` |
+
+**Not auto-injected** (specify yourself if you need them): `-b:a` / `-b:v`, `-vn` / `-an`, `-map`, `-re`, HLS reconnect flags (`-user_agent`, `-protocol_whitelist`, `-reconnect *`), HTTP `-headers`, `-stream_loop`, hardware accel. The auto-fill is conservative — anything you pass is left alone.
+
+A single `FromShell` produces one output (audio OR video). Raw PCM/YUV output codecs (`-c:a pcm_*`, `-f rawvideo`, …) are rejected up front with a pointer at the correct flags.
+
+#### Audio recipes
+
+All examples below are `FromShell(<cmd>, gotgcall.TrackAudio)`. The `<cmd>` is shown as a Go raw string literal.
+
+**Tempo change (atempo)** — pitch-preserving speed-up/slow-down. Stack multiple `atempo` filters for ratios outside `[0.5, 2.0]`:
 
 ```go
-gotgcall.FromShell(`ffmpeg -analyzeduration 0 -probesize 64k -err_detect ignore_err `+
-    `-i "song.mp3" -vn -c:a libopus -b:a 64k -application audio `+
-    `-frame_duration 20 -page_duration 20000 -mapping_family 0 `+
-    `-ar 48000 -ac 2 -f ogg pipe:1`, gotgcall.TrackAudio)
+`ffmpeg -i "song.mp3" -af "atempo=1.25"`
+`ffmpeg -i "song.mp3" -af "atempo=2.0,atempo=1.25"`   // = 2.5x
 ```
 
-Video-only example:
+**Loudness normalization (EBU R128)** — broadcast-grade levelling. Two-pass is more accurate; one-pass is fine for live streams:
 
 ```go
-gotgcall.FromShell(`ffmpeg -i "movie.mp4" -an -c:v libvpx -deadline realtime `+
-    `-b:v 800k -vf scale=1280:720 -r 30 -f ivf pipe:1`, gotgcall.TrackVideo)
+`ffmpeg -i "song.mp3" -af "loudnorm=I=-16:LRA=11:TP=-1.5"`
 ```
 
-A single `FromShell` call produces a single output (audio OR video). Raw PCM/YUV output codecs (`-c:a pcm_*`, `-f rawvideo`, etc.) are rejected up front with a useful error.
+**Volume / gain** — linear or dB:
+
+```go
+`ffmpeg -i "song.mp3" -af "volume=1.5"`        // +50 %
+`ffmpeg -i "song.mp3" -af "volume=-6dB"`       // -6 dB
+```
+
+**Bass / treble shelf** — simple two-band EQ:
+
+```go
+`ffmpeg -i "song.mp3" -af "bass=g=6,treble=g=2"`
+```
+
+**Pitch shift (semitones)** — resample + atempo trick; `1.06` ≈ +1 semitone, `0.944` ≈ -1:
+
+```go
+`ffmpeg -i "song.mp3" -af "asetrate=48000*1.06,aresample=48000,atempo=1/1.06"`
+```
+
+**Fade in / out**:
+
+```go
+`ffmpeg -i "song.mp3" -af "afade=t=in:d=2"`
+`ffmpeg -i "song.mp3" -af "afade=t=out:st=180:d=5"`
+```
+
+**Mix two sources (amix)** — overlay background ambience under music:
+
+```go
+`ffmpeg -i "music.mp3" -i "ambient.wav" -filter_complex "amix=inputs=2:duration=longest:weights=1 0.3"`
+```
+
+**Seek to start position** — initial play offset; note that Pause/Resume's `-ss` injection replaces this on resume (you control the *first* play position only):
+
+```go
+`ffmpeg -ss 90 -i "song.mp3"`
+```
+
+**Infinite loop** — replay forever:
+
+```go
+`ffmpeg -stream_loop -1 -i "jingle.mp3"`
+```
+
+**Concat playlist (concat protocol)** — gapless join of identically-encoded files:
+
+```go
+`ffmpeg -i "concat:track01.mp3|track02.mp3|track03.mp3"`
+```
+
+For mixed-format playlists use the concat *demuxer* with a list file:
+
+```go
+`ffmpeg -f concat -safe 0 -i "playlist.txt"`
+```
+
+**HLS / live radio with reconnect + custom UA** — `FromShell` does NOT inject the HLS-specific flags that `FromURL` does; add them yourself if your source needs them:
+
+```go
+`ffmpeg -user_agent "Mozilla/5.0" -reconnect 1 -reconnect_at_eof 1 ` +
+`-reconnect_streamed 1 -reconnect_delay_max 5 -rw_timeout 10000000 ` +
+`-protocol_whitelist "file,http,https,tcp,tls" ` +
+`-i "https://stream.example.com/radio.m3u8"`
+```
+
+**HTTP with custom headers / cookies** — inject Referer / Cookie / Authorization on the input:
+
+```go
+`ffmpeg -headers "Referer: https://example.com\r\nCookie: session=abc\r\n" ` +
+`-i "https://example.com/protected.mp3"`
+```
+
+(`\r\n` here is **literal** four characters in the Go raw string — ffmpeg's `-headers` parses them as CRLF separators between header lines.)
+
+**RTSP / RTMP / SRT input** — `FromShell` is the right escape hatch when you need transport flags:
+
+```go
+`ffmpeg -rtsp_transport tcp -i "rtsp://camera.local/live"`
+`ffmpeg -i "srt://ingest.example.com:9000?mode=caller"`
+```
+
+#### Video recipes
+
+All examples below are `FromShell(<cmd>, gotgcall.TrackVideo)`. Telegram requires VP8 — `libvpx` is the only video encoder that works end-to-end, so most recipes here are filter-side, not codec-side.
+
+**Scale + framerate + bitrate**:
+
+```go
+`ffmpeg -i "movie.mp4" -vf "scale=1280:720" -r 30 -b:v 1500k`
+```
+
+**Letterbox a vertical / odd-aspect source to 720p**:
+
+```go
+`ffmpeg -i "vertical.mp4" -vf "scale=1280:-2:force_original_aspect_ratio=decrease,` +
+`pad=1280:720:(ow-iw)/2:(oh-ih)/2:black"`
+```
+
+**Watermark / logo overlay**:
+
+```go
+`ffmpeg -i "movie.mp4" -i "logo.png" -filter_complex "overlay=W-w-20:20"`
+```
+
+**Burned-in timestamp (drawtext)** — useful for security-camera feeds:
+
+```go
+`ffmpeg -i "movie.mp4" -vf "drawtext=text='%{localtime}':fontcolor=white:fontsize=24:` +
+`box=1:boxcolor=black@0.5:boxborderw=5:x=10:y=10"`
+```
+
+**RTSP IP camera** — TCP transport survives lossy Wi-Fi better than the UDP default:
+
+```go
+`ffmpeg -rtsp_transport tcp -i "rtsp://user:pass@192.168.1.10/Streaming/Channels/101"`
+```
+
+**Live screen capture**:
+
+```go
+// Linux (X11):
+`ffmpeg -f x11grab -framerate 30 -video_size 1920x1080 -i ":0.0"`
+
+// Windows:
+`ffmpeg -f gdigrab -framerate 30 -i "desktop"`
+
+// macOS (avfoundation index from -f avfoundation -list_devices true -i ""):
+`ffmpeg -f avfoundation -framerate 30 -i "1:none"`
+```
 
 ### `FromShells` — dual ffmpeg legs
 
@@ -230,14 +373,54 @@ For ntgcalls-style "microphone + camera" patterns where you want full control ov
 
 ```go
 gotgcall.FromShells(
-    `ffmpeg -i "x.mp4"`,                                            // audio leg
-    `ffmpeg -i "x.mp4" -vf scale=1280:720 -b:v 1500k`,              // video leg
+    `ffmpeg -i "movie.mp4"`,                                // audio leg
+    `ffmpeg -i "movie.mp4" -vf "scale=1280:720" -b:v 1500k`, // video leg
 )
 ```
 
 Each cmd goes through the same auto-flag injection as `FromShell`. Either string may be empty to skip that track.
 
 For the convenience path use `FromFile`/`FromURL` with `Tracks: TrackVideo` and let the library construct both ffmpeg commands for you.
+
+#### Dual-leg recipes
+
+**Audio file over a static cover image** — "music with art":
+
+```go
+gotgcall.FromShells(
+    `ffmpeg -i "song.mp3"`,
+    `ffmpeg -loop 1 -framerate 1 -i "cover.jpg" -vf "scale=1280:720" -r 1 -b:v 200k`,
+)
+```
+
+**Different sources per leg** — radio audio + live webcam:
+
+```go
+gotgcall.FromShells(
+    `ffmpeg -i "https://stream.example.com/radio.mp3"`,
+    `ffmpeg -f v4l2 -framerate 30 -video_size 1280x720 -i "/dev/video0"`,
+)
+```
+
+**A/V sync under time-distortion** — when speeding up audio with `atempo`, scale video PTS by the same factor or the legs drift apart:
+
+```go
+gotgcall.FromShells(
+    `ffmpeg -i "movie.mp4" -af "atempo=1.25"`,
+    `ffmpeg -i "movie.mp4" -vf "setpts=PTS/1.25,scale=1280:720" -r 30 -b:v 1500k`,
+)
+```
+
+#### Shell-source gotchas
+
+- **No shell features.** The argv is exec'd directly, so `$VAR`, `${VAR}`, `*.mp3`, `$(cmd)`, `cmd1 | cmd2`, `cmd1 && cmd2`, `>` redirects, and `~` expansion are all **literal characters**. Substitute env vars in Go before composing the string.
+- **No `/dev/stdin` source.** `FromShell` has no way to pipe bytes in from your Go process; `ffmpeg -i pipe:0` would just block. Spawn external producers (yt-dlp, etc.) yourself and write the file to disk first, or have them stream to a URL you can then `-i`.
+- **Quoting.** Use double quotes for arguments with spaces; `\"` for a literal `"` inside; `\\` for a literal `\`. Single quotes are not quote characters — they're literal apostrophes (filenames like `Don't Stop.mp3` work as-is, no quoting needed unless there's a space).
+- **HLS/HTTP convenience flags don't apply.** `FromFile`/`FromURL` inject `-user_agent`, `-reconnect *`, `-protocol_whitelist`, `-rw_timeout` automatically; `FromShell` does not. Add them yourself when streaming m3u8 / unreliable HTTP.
+- **Hardware encoders rarely help.** Telegram only accepts VP8, and very few platforms have a VP8 hardware encoder (some Intel iGPUs have `vp8_vaapi`; most NVENC/QSV builds don't). Stick with `libvpx`.
+- **`-c:a copy` / `-c:v copy` is brittle.** Even if the source is already Opus or VP8, pacing depends on per-frame metadata the OGG/IVF muxers add — `copy` paths often miss the page/keyframe cadence the streamer expects. Re-encode is the safe default.
+- **Auto-fill is per-flag, not all-or-nothing.** Each flag is checked independently — `-c:a libopus -b:a 192k` keeps your bitrate and still fills in `-application`, `-frame_duration`, `-page_duration`, `-mapping_family`, `-ar`, `-ac`, `-f`. The only setting that gets *rejected* is a raw PCM/YUV output codec, with an error pointing at the right replacement.
+- **Inspecting the realized argv.** gotgcall doesn't currently log the post-injection argv. Turn on `WithFFmpegStderrLog()` and you'll see ffmpeg's own "Input #0 …" / "Stream mapping" output, which confirms what it parsed and which streams it picked.
 
 ### `EncodeOptions`
 
@@ -594,48 +777,67 @@ The WebRTC layer underneath gotgcall is built directly on pion's lower-level pac
 
 ## FAQ
 
-### Is this a port of ntgcalls / pytgcalls to Go?
+<details>
+<summary><b>Is this a port of ntgcalls / pytgcalls to Go?</b></summary>
 
 No — it's an independent implementation with a deliberately ntgcalls-shaped API so existing bot code translates almost line-for-line. ntgcalls wraps libwebrtc (C++); `gotgcall` uses [pion](https://github.com/pion/webrtc), the pure-Go WebRTC stack.
+</details>
 
-### Does it work with gogram, MTProto-Go, or other MTProto libraries?
+<details>
+<summary><b>Does it work with gogram, MTProto-Go, or other MTProto libraries?</b></summary>
 
 Yes — any of them. The library is blob-only: it produces and consumes JSON strings; you handle the MTProto layer (`phone.JoinGroupCall` / `phone.LeaveGroupCall`) in your bot using whichever MTProto Go library you prefer. The `examples/bot/` directory has a runnable skeleton against [gogram](https://github.com/amarnathcjd/gogram).
+</details>
 
-### Can I use this for a Telegram music bot?
+<details>
+<summary><b>Can I use this for a Telegram music bot?</b></summary>
 
-That's the primary use case. See [`examples/bot/`](examples/bot) and the [`FromShell` recipes](#fromshell--single-custom-ffmpeg-leg) for piping yt-dlp / atempo / loudness-normalised ffmpeg pipelines.
+That's the primary use case. See [`examples/bot/`](examples/bot) and the [`FromShell` audio recipes](#audio-recipes) for atempo, loudness normalisation, equalizer, fade, mix, and live-radio HLS pipelines. `FromShell` cannot pipe bytes in from another Go process (no stdin source) — fetch with yt-dlp / similar tools to a file or URL first, then point `FromFile` / `FromURL` / `FromShell` at it.
+</details>
 
-### Does it support video chats / livestreams / RTMP push?
+<details>
+<summary><b>Does it support video chats / livestreams / RTMP push?</b></summary>
 
 Yes — three modes:
-1. **WebRTC**: send-only audio + video into a normal voice/video chat.
-2. **RTMP push**: "go live" broadcasts to a channel via Telegram's RTMP ingest URL. See [RTMP mode](#rtmp-mode).
-3. **Custom ffmpeg**: `FromShell` / `FromShells` lets you point at any decodable container or live source — HLS, RTSP, MJPEG, screen capture, etc.
 
-### Does it support TGCalls / MTProto E2E voice calls?
+1. **WebRTC group video.** Send-only audio + video into a normal voice/video chat.
+2. **RTMP push.** "Go live" broadcasts to a channel via Telegram's RTMP ingest URL — see [RTMP mode](#rtmp-mode).
+3. **Custom ffmpeg.** `FromShell` / `FromShells` lets you point at any decodable container or live source — HLS, RTSP, MJPEG, screen capture, IP camera, etc.
+</details>
+
+<details>
+<summary><b>Does it support TGCalls / MTProto E2E voice calls?</b></summary>
 
 No — only group calls and channel RTMP livestreams. 1-on-1 MTProto voice/video calls (TGCalls) require a different signalling path that this library does not currently target.
+</details>
 
-### What Go version is required?
+<details>
+<summary><b>What Go version is required?</b></summary>
 
 Go 1.26 or newer (uses `errors.AsType[T]` and a few stdlib refinements added in 1.26).
+</details>
 
-### Does it run on Windows?
+<details>
+<summary><b>Does it run on Windows?</b></summary>
 
 Yes. Pure-Go means no Make/gcc/clang. Pause/Resume in WebRTC mode uses a channel gate (works on every OS); RTMP mode uses kill+restart-with-`-ss` (also OS-agnostic — `SIGSTOP` would be killed by Telegram's RTMP ingest timeout anyway).
+</details>
 
-### How many concurrent calls can one process handle?
+<details>
+<summary><b>How many concurrent calls can one process handle?</b></summary>
 
-The library has no hardcoded limit. The practical ceiling is ffmpeg subprocess count + ICE socket count. Use `WithSharedUDPMux()` to collapse all calls onto one UDP socket once you're above ~100 concurrent calls.
+The library has no hardcoded limit. The practical ceiling is ffmpeg subprocess count + ICE socket count. Use `WithSharedUDPMux()` to collapse all calls onto one UDP socket once you're above ~100 concurrent calls. See [UDP mux & scaling](#udp-mux--scaling).
+</details>
 
-### Where do I report bugs?
+<details>
+<summary><b>Where do I report bugs?</b></summary>
 
-Open an issue with logs from `WithLogger(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug})))` — debug-level logging covers streamer state, ffmpeg exit, ICE transitions.
+Open an issue with logs from `WithVerboseConnectionLogs()` + `WithFFmpegStderrLog()` — that combination covers streamer state, ffmpeg exit, ICE transitions, DTLS, and per-candidate trace.
+</details>
 
 ## See also
 
-- [pion/webrtc](https://github.com/pion/webrtc) — pure-Go WebRTC stack (the WebRTC layer underneath).
+- [pion/webrtc](https://github.com/pion/webrtc) — pure-Go WebRTC stack (the layer underneath).
 - [amarnathcjd/gogram](https://github.com/amarnathcjd/gogram) — pure-Go MTProto client used in the example.
 - [pytgcalls/ntgcalls](https://github.com/pytgcalls/ntgcalls) — the C++ library this is an alternative to.
 

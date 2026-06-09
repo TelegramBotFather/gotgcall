@@ -57,7 +57,7 @@ That's a working voice-chat playback bot. Everything else in this README is opti
 - **Single static binary.** `CGO_ENABLED=0 go build` → `scp` → run. No libwebrtc, no glibc, no C++ toolchain — `ffmpeg` is the only runtime dependency.
 - **Fast connect.** Reaches the SFU in tens of milliseconds. Built on [pion v4](https://github.com/pion/webrtc) under the hood.
 - **Blob-only signalling.** The library never imports `gogram` or any MTProto code. Use any MTProto Go client you like.
-- **ntgcalls-shaped API.** `CreateCall` / `Connect` / `SetStreamSources` / `Pause` / `Resume` / `Mute` / `Stop` — existing bot code translates line-for-line.
+- **ntgcalls-shaped API.** `CreateCall` / `Connect` / `SetStreamSources` / `Pause` / `Resume` / `Mute` / `SeekBy` / `Stop` — existing bot code translates line-for-line.
 - **Three source modes.** `FromFile`, `FromURL`, `FromShell` — anything ffmpeg can decode is fair game (HLS, RTSP, RTMP, MJPEG, screen capture, …).
 - **WebRTC + RTMP push.** Group voice/video chats *and* "go live" RTMP broadcasts via one client.
 - **Scales to tens of thousands of calls** per process with `WithSharedUDPMux` + raised FD limits.
@@ -82,7 +82,7 @@ That's a working voice-chat playback bot. Everything else in this README is opti
 - [Install](#install) · [Architecture](#architecture-at-a-glance) · [Quick start](#quick-start)
 - **Sources** — [`FromFile` / `FromURL`](#fromfile--fromurl) · [`FromShell`](#fromshell--single-custom-ffmpeg-leg) ([audio recipes](#audio-recipes) · [video recipes](#video-recipes)) · [`FromShells`](#fromshells--dual-ffmpeg-legs) ([dual-leg recipes](#dual-leg-recipes)) · [Gotchas](#shell-source-gotchas) · [`EncodeOptions`](#encodeoptions)
 - **Client** — [Options](#client-options) · [Debug logs](#enabling-debug-logs) · [UDP mux & scaling](#udp-mux--scaling)
-- **Lifecycle** — [WebRTC mode](#webrtc-mode) · [RTMP mode](#rtmp-mode) · [Pause / Resume / Mute](#pause--resume--mute) · [Callbacks](#callbacks) · [Server-side state changes](#server-side-media-state-changes-admin-mute-video-off)
+- **Lifecycle** — [WebRTC mode](#webrtc-mode) · [RTMP mode](#rtmp-mode) · [Pause / Resume / Mute](#pause--resume--mute) · [Seek](#seek) · [Callbacks](#callbacks) · [Server-side state changes](#server-side-media-state-changes-admin-mute-video-off)
 - **Reference** — [Errors](#errors) · [Concurrency model](#concurrency-model) · [Goroutine budget](#goroutine-budget) · [Networking](#networking) · [A/V sync](#av-sync) · [Pitfalls](#pitfalls)
 - **Performance** — [Tuning](#performance-tuning) · [Memory](#memory-usage) · [Scaling ballparks](#concurrency--scaling-ballparks) · [vs ntgcalls](#performance-vs-ntgcalls)
 - [Why pure Go](#why-pure-go) · [FAQ](#faq) · [See also](#see-also) · [License](#license)
@@ -561,6 +561,21 @@ ok, err  = client.Unmute(chatID)
 - **RTMP Pause/Resume:** a brief ~100–300 ms gap on resume (Telegram's RTMP ingest closes silent streams).
 - **Mute** silences the audio track; video keeps going.
 - `SetStreamSources` can be called any time. While paused, the new source is recorded and starts at offset 0 on Resume.
+
+## Seek
+
+```go
+err := client.SeekBy(chatID, +30_000) // forward 30s
+err  = client.SeekBy(chatID, -10_000) // back 10s
+```
+
+`SeekBy(chatID, deltaMs)` is **relative** to the current position. Positive jumps forward, negative jumps backward. Internally it kills ffmpeg and respawns at the new offset via `SeekableSource.OpenAt` — same machinery Resume uses, just with a user-chosen target.
+
+- **Out-of-range → EOF.** Underflow below 0 fires `OnStreamEnd` instead of seeking. Forward overshoots past the source duration are detected naturally — ffmpeg yields zero frames after `-ss` and the streamer EOFs on its own. Both paths land your "play next track" logic on the same callback.
+- **Errors.** `ErrNoSource` when nothing is playing, `ErrSeekUnsupported` when the active source doesn't implement `SeekableSource` (today every built-in source does — `FromFile` / `FromURL` / `FromShell` all inject `-ss`).
+- **No `OnUpgrade` fire.** `SeekBy` is user-initiated; the caller already knows they moved.
+- **Works while paused.** Position updates immediately; Resume picks up at the new offset.
+- For absolute seeks: `client.SeekBy(chat, targetMs - int64(client.Time(chat)))` — the lib intentionally doesn't expose a `SeekTo` (one line at the caller side).
 
 ## Callbacks
 

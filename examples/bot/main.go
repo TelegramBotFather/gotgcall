@@ -172,6 +172,11 @@ func main() {
 	if err = client.SetStreamSources(cfg.ChatID, src); err != nil {
 		log.Fatalf("set source: %v", err)
 	}
+	// Other lifecycle ops available on `client` while streaming:
+	//   client.SeekBy(chatID, +30_000)  // jump forward 30s
+	//   client.SeekBy(chatID, -10_000)  // jump back 10s; underflow → OnStreamEnd
+	//   client.Mute(chatID) / client.Unmute(chatID)
+	//   client.SetStreamSources(chatID, ...)  // switch source mid-call
 	log.Println("streaming; press Ctrl+C to stop")
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)

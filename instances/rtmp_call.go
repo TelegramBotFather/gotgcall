@@ -173,6 +173,46 @@ func (r *RTMPCall) notSupportedToggle(flag *bool, target bool) (bool, error) {
 	return true, nil
 }
 
+// SeekBy shifts playback by deltaMs relative to the current position
+// (positive forward, negative backward). Underflow below 0 force-stops
+// ffmpeg and lets its onExit dispatch OnStreamEnd. Normal seek nils
+// the old ffmpeg's onExit (so its cancel doesn't masquerade as EOF),
+// stops it, advances resumeMs, and respawns at the new offset.
+func (r *RTMPCall) SeekBy(deltaMs int64) error {
+	if r.closed.Load() {
+		return models.ErrClosed
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.srcPath == nil {
+		return models.ErrNoSource
+	}
+	var curMs uint64
+	switch {
+	case r.paused:
+		curMs = r.resumeMs
+	case r.cmd != nil:
+		curMs = uint64(time.Since(r.startedAt) / time.Millisecond)
+	}
+	target := int64(curMs) + deltaMs
+	if target < 0 {
+		r.stopFFmpegLocked()
+		r.resumeMs = 0
+		r.elapsedMs.Store(0)
+		return nil
+	}
+	if r.cmd != nil {
+		r.cmd.SetOnExit(nil)
+	}
+	r.stopFFmpegLocked()
+	r.resumeMs = uint64(target)
+	r.elapsedMs.Store(r.resumeMs)
+	if r.paused {
+		return nil
+	}
+	return r.spawnLocked(context.Background(), r.resumeMs)
+}
+
 func (r *RTMPCall) Stop() error {
 	if !r.closed.CompareAndSwap(false, true) {
 		return nil

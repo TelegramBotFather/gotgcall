@@ -21,11 +21,12 @@ type GroupCallEvents struct {
 	OnConnectionChange func(info models.NetworkInfo)
 	// OnUpgrade fires on every outgoing state change that flips a
 	// MediaState bit: Pause / Resume / Mute / Unmute (each only when the
-	// state actually changed — no-op toggles stay silent), plus
-	// *spontaneous* transitions (video leg EOF/crash mid-stream, PC
-	// Failed/Closed while video was active). SetSource and Stop do not
-	// fire: the caller chose the new source / brought the call down and
-	// can drive MTProto flags directly in the same code path.
+	// state actually changed — no-op toggles stay silent), plus PC
+	// Failed/Closed while video was active. Stream EOF (audio or video)
+	// does not fire — OnStreamEnd already signals that. SetSource and
+	// Stop also stay silent: the caller chose the new source / brought
+	// the call down and can drive MTProto flags directly in the same
+	// code path.
 	// Mirror of ntgcalls' onUpgrade(MediaState) pattern.
 	OnUpgrade func(state models.MediaState)
 }
@@ -346,6 +347,9 @@ func (g *GroupCall) startLocked(ctx context.Context) error {
 				g.handleStreamerEnd(models.Audio, models.Microphone, endErr, s)
 			})
 			s.SetMuted(g.muted)
+			if g.paused {
+				s.SetPaused(true)
+			}
 			s.Start()
 			g.audioStr = s
 			audioOK = true
@@ -365,6 +369,9 @@ func (g *GroupCall) startLocked(ctx context.Context) error {
 				g.handleStreamerEnd(models.Video, models.Camera, endErr, s)
 			})
 			s.SetMuted(g.videoOff)
+			if g.paused {
+				s.SetPaused(true)
+			}
 			s.Start()
 			g.videoStr = s
 			videoOK = true
@@ -449,10 +456,11 @@ func (g *GroupCall) handleStreamerEnd(t models.StreamType, d models.Device, err 
 		} else {
 			siblingVideo = g.videoStr
 		}
-		prev := g.currentStateLocked()
 		g.audioStr = nil
 		g.videoStr = nil
-		g.fireUpgradeIfChangedLocked(prev)
+		// EOF doesn't fire OnUpgrade — OnStreamEnd already signals
+		// end-of-stream and the caller drives any MTProto state change
+		// from there.
 		fn := g.ev.OnStreamEnd
 		g.mu.Unlock()
 
@@ -637,6 +645,66 @@ func (g *GroupCall) Stop() error {
 	// videoStopped=true after a vplay→Stop would be inconsistent with
 	// play→Stop (which fires nothing because the state never changed).
 	return g.pc.Close()
+}
+
+// SeekBy shifts playback by deltaMs relative to the current position
+// (positive forward, negative backward). If the resulting position is
+// below 0 the seek is treated as an EOF: streamers are stopped and
+// OnStreamEnd fires through the normal handleStreamerEnd path. Forward
+// overshoots past source duration are detected naturally — ffmpeg's
+// `-ss` lands past the end, the OGG/IVF reader sees zero frames, and
+// the streamer EOFs on its own.
+//
+// Returns ErrSeekUnsupported if the source does not implement
+// media.SeekableSource and ErrNoSource if no source is currently
+// playing. Does not fire OnUpgrade — the user initiated the move
+// (same principle as SetSource).
+func (g *GroupCall) SeekBy(deltaMs int64) error {
+	if g.closed.Load() {
+		return models.ErrClosed
+	}
+	g.mu.Lock()
+	if g.src == nil {
+		g.mu.Unlock()
+		return models.ErrNoSource
+	}
+	if _, ok := g.src.(media.SeekableSource); !ok {
+		g.mu.Unlock()
+		return models.ErrSeekUnsupported
+	}
+	if deltaMs == 0 {
+		g.mu.Unlock()
+		return nil
+	}
+	var streamerMs uint64
+	switch {
+	case g.audioStr != nil:
+		streamerMs = g.audioStr.ElapsedMs()
+	case g.videoStr != nil:
+		streamerMs = g.videoStr.ElapsedMs()
+	}
+	target := int64(g.resumeMs+streamerMs) + deltaMs
+	if target < 0 {
+		// Underflow → force EOF. stopStreamersLocked triggers each
+		// streamer's onEnd which dispatches OnStreamEnd through the
+		// normal handleStreamerEnd path (endedOnce is still false from
+		// startLocked, so the first leg fires).
+		g.stopStreamersLocked()
+		g.mu.Unlock()
+		return nil
+	}
+	// Normal seek: suppress the old streamers' EOF dispatches via
+	// switching, kill them, advance resumeMs, reopen via OpenAt. The
+	// switching flag is cleared after Unlock by defer (mirrors
+	// SetStreamSources — any race window during new-streamer Start is
+	// the same one SetStreamSources accepts).
+	g.switching.Store(true)
+	defer g.switching.Store(false)
+	g.stopStreamersLocked()
+	g.resumeMs = uint64(target)
+	err := g.startLocked(context.Background())
+	g.mu.Unlock()
+	return err
 }
 
 func (g *GroupCall) ElapsedMs() uint64 {

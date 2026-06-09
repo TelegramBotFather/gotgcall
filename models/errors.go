@@ -14,4 +14,6 @@ var (
 	ErrInternal           = errors.New("gotgcall: internal error")
 	ErrNotConnected       = errors.New("gotgcall: call not connected")
 	ErrWrongMode          = errors.New("gotgcall: operation not valid for call mode")
+	ErrNoSource           = errors.New("gotgcall: no source currently playing")
+	ErrSeekUnsupported    = errors.New("gotgcall: source is not seekable")
 )

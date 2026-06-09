@@ -591,6 +591,25 @@ func (c *Client) Unmute(chatID int64) (bool, error) {
 	return call.Unmute()
 }
 
+// SeekBy shifts playback by deltaMs (signed; positive forward, negative
+// backward) relative to the current position. Underflow below 0 fires
+// OnStreamEnd instead of seeking — caller's auto-skip-to-next logic
+// can drive off the same callback as natural end-of-stream. Forward
+// overshoots past source duration are detected by ffmpeg yielding zero
+// frames after the seek (also natural OnStreamEnd path).
+//
+// Returns ErrSeekUnsupported if the active source is not seekable
+// (live FromShell commands that ignore -ss fall here), ErrNoSource if
+// no source is currently playing, and ErrConnectionNotFound if there's
+// no call for chatID.
+func (c *Client) SeekBy(chatID int64, deltaMs int64) error {
+	call, err := c.lookup(chatID)
+	if err != nil {
+		return err
+	}
+	return call.SeekBy(deltaMs)
+}
+
 // Stop tears down the call and clears the per-chat call entry. The
 // per-chat create-mutex is intentionally kept (see reap) so a concurrent
 // CreateCall parked on mu.Lock() doesn't end up racing a later one on a

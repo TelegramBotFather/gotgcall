@@ -28,6 +28,14 @@ type Call interface {
 	Unmute() (bool, error)
 	Stop() error
 
+	// SeekBy shifts playback by deltaMs relative to the current position
+	// (positive forward, negative backward). Underflow below 0 triggers
+	// EOF via the OnStreamEnd path. Forward overshoots past the source
+	// duration are detected naturally by ffmpeg yielding zero frames.
+	// Returns ErrSeekUnsupported if the active source is not seekable
+	// and ErrNoSource if nothing is currently playing.
+	SeekBy(deltaMs int64) error
+
 	ElapsedMs() uint64
 	State() models.MediaState
 	NetState() models.ConnState

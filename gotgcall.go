@@ -47,10 +47,11 @@ const (
 // --- Re-exports for ergonomics -------------------------------------------------
 
 type (
-	Source         = media.Source
-	SeekableSource = media.SeekableSource
-	EncodeOptions  = media.EncodeOptions
-	Track          = media.Track
+	Source           = media.Source
+	SeekableSource   = media.SeekableSource
+	MultiShellSource = media.MultiShellSource
+	EncodeOptions    = media.EncodeOptions
+	Track            = media.Track
 
 	StreamType  = models.StreamType
 	Device      = models.Device

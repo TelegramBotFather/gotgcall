@@ -382,6 +382,16 @@ Each cmd goes through the same auto-flag injection as `FromShell`. Either string
 
 For the convenience path use `FromFile`/`FromURL` with `Tracks: TrackVideo` and let the library construct both ffmpeg commands for you.
 
+`FromShells` returns `*MultiShellSource`, which satisfies both `Source` and `SeekableSource` — `client.SeekBy(chatID, deltaMs)` works for dual-leg sources, killing both ffmpegs and re-spawning with `-ss <offset>` injected into each leg.
+
+**Sequential vs parallel spawn.** By default both legs spawn sequentially (audio then video). When both legs read the same URL, this avoids tripping CDN per-IP concurrency throttles. Opt into concurrent spawn when the legs read independent inputs (separate files, separate camera/mic devices):
+
+```go
+gotgcall.FromShells(audioCmd, videoCmd).WithParallelSpawn()
+```
+
+Single-leg sources ignore the flag — there's nothing to parallelize.
+
 #### Dual-leg recipes
 
 **Audio file over a static cover image** — "music with art":

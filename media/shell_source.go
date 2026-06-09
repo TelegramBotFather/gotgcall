@@ -6,6 +6,7 @@ import (
 	stdio "io"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	gtio "github.com/annihilatorrrr/gotgcall/io"
@@ -232,25 +233,30 @@ func (s *shellSource) openWith(ctx context.Context, args []string) (*Streams, er
 	return st, nil
 }
 
-// FromShells builds a Source from two separate ffmpeg commands — one for
-// audio, one for video. Either string may be empty to skip that track.
-// Mirrors ntgcalls' MediaDescription(microphone, camera) pattern for users
-// who want full control over both legs.
+// FromShells builds a MultiShellSource from two separate ffmpeg commands
+// — one for audio, one for video. Either string may be empty to skip
+// that track. Mirrors ntgcalls' MediaDescription(microphone, camera)
+// pattern for users who want full control over both legs.
 //
 // Each cmd goes through the same auto-flag injection as FromShell, so a
 // minimal `ffmpeg -i movie.mp4` works for either leg.
-func FromShells(audioCmd, videoCmd string) Source {
+//
+// The concrete return type lets callers chain optional configuration
+// like WithParallelSpawn before passing the value as a Source. Existing
+// `var s Source = FromShells(...)` call sites still compile unchanged
+// because *MultiShellSource satisfies Source.
+func FromShells(audioCmd, videoCmd string) *MultiShellSource {
 	if audioCmd == "" && videoCmd == "" {
-		return &multiShellSource{err: fmt.Errorf("%w: both commands empty", models.ErrInvalidParams)}
+		return &MultiShellSource{err: fmt.Errorf("%w: both commands empty", models.ErrInvalidParams)}
 	}
-	s := &multiShellSource{}
+	s := &MultiShellSource{}
 	if audioCmd != "" {
 		tokens := tokenizeShell(audioCmd)
 		if len(tokens) == 0 {
-			return &multiShellSource{err: fmt.Errorf("%w: empty audio command", models.ErrFFmpegSpawn)}
+			return &MultiShellSource{err: fmt.Errorf("%w: empty audio command", models.ErrFFmpegSpawn)}
 		}
 		if err := validateOutputCodec(tokens[1:], TrackAudio); err != nil {
-			return &multiShellSource{err: err}
+			return &MultiShellSource{err: err}
 		}
 		s.audioBin = tokens[0]
 		s.audioArgs = ensureFFmpegFlags(tokens[1:], TrackAudio)
@@ -258,10 +264,10 @@ func FromShells(audioCmd, videoCmd string) Source {
 	if videoCmd != "" {
 		tokens := tokenizeShell(videoCmd)
 		if len(tokens) == 0 {
-			return &multiShellSource{err: fmt.Errorf("%w: empty video command", models.ErrFFmpegSpawn)}
+			return &MultiShellSource{err: fmt.Errorf("%w: empty video command", models.ErrFFmpegSpawn)}
 		}
 		if err := validateOutputCodec(tokens[1:], TrackVideo); err != nil {
-			return &multiShellSource{err: err}
+			return &MultiShellSource{err: err}
 		}
 		s.videoBin = tokens[0]
 		s.videoArgs = ensureFFmpegFlags(tokens[1:], TrackVideo)
@@ -269,15 +275,35 @@ func FromShells(audioCmd, videoCmd string) Source {
 	return s
 }
 
-type multiShellSource struct {
+// MultiShellSource is the concrete return type of FromShells. It
+// satisfies both Source and SeekableSource. Use WithParallelSpawn to
+// opt into spawning the two ffmpeg legs concurrently at Open/OpenAt
+// time.
+type MultiShellSource struct {
 	err       error
 	audioBin  string
 	videoBin  string
 	audioArgs []string
 	videoArgs []string
+	parallel  bool
 }
 
-func (s *multiShellSource) Tracks() Track {
+// WithParallelSpawn opts into starting both ffmpeg legs concurrently
+// when Open or OpenAt fires. Default is sequential (audio then video),
+// which avoids CDN per-IP concurrency throttles when both legs read the
+// same HTTP/HLS URL. Enable this only when the two legs read
+// independent inputs (separate files, separate camera/mic devices) or
+// when you've verified your source can handle concurrent opens. Only
+// takes effect when both legs are non-empty; single-leg sources stay
+// sequential since there's nothing to parallelize.
+//
+// Returns the receiver for chaining: `FromShells(a, v).WithParallelSpawn()`.
+func (s *MultiShellSource) WithParallelSpawn() *MultiShellSource {
+	s.parallel = true
+	return s
+}
+
+func (s *MultiShellSource) Tracks() Track {
 	var t Track
 	if s.audioArgs != nil {
 		t |= TrackAudio
@@ -288,10 +314,44 @@ func (s *multiShellSource) Tracks() Track {
 	return t
 }
 
-func (s *multiShellSource) Open(ctx context.Context) (*Streams, error) {
+func (s *MultiShellSource) Open(ctx context.Context) (*Streams, error) {
 	if s.err != nil {
 		return nil, s.err
 	}
+	return s.openWith(ctx, s.audioArgs, s.videoArgs)
+}
+
+// OpenAt spawns both legs with `-ss <offset>` injected before the first
+// `-i` of each non-empty leg, mirroring shellSource.OpenAt. Either leg
+// may be empty; that leg is skipped. Makes FromShells satisfy
+// SeekableSource so GroupCall.SeekBy and startLocked's resume-at-offset
+// path work for dual-leg (vplay) sources.
+func (s *MultiShellSource) OpenAt(ctx context.Context, offset time.Duration) (*Streams, error) {
+	if s.err != nil {
+		return nil, s.err
+	}
+	if offset <= 0 {
+		return s.openWith(ctx, s.audioArgs, s.videoArgs)
+	}
+	audio := s.audioArgs
+	if audio != nil {
+		audio = injectSeek(audio, offset)
+	}
+	video := s.videoArgs
+	if video != nil {
+		video = injectSeek(video, offset)
+	}
+	return s.openWith(ctx, audio, video)
+}
+
+func (s *MultiShellSource) openWith(ctx context.Context, audioArgs, videoArgs []string) (*Streams, error) {
+	if s.parallel && audioArgs != nil && videoArgs != nil {
+		return s.openParallel(ctx, audioArgs, videoArgs)
+	}
+	return s.openSequential(ctx, audioArgs, videoArgs)
+}
+
+func (s *MultiShellSource) openSequential(ctx context.Context, audioArgs, videoArgs []string) (*Streams, error) {
 	var closers []stdio.Closer
 	closeAll := func() error {
 		var firstErr error
@@ -303,12 +363,8 @@ func (s *multiShellSource) Open(ctx context.Context) (*Streams, error) {
 		return firstErr
 	}
 	st := &Streams{close: closeAll}
-	if s.audioArgs != nil {
-		bin := s.audioBin
-		if bin == "" {
-			bin = ffmpegPath()
-		}
-		r, err := gtio.NewShellReader(ctx, bin, s.audioArgs, getLogger(), StderrLogEnabled())
+	if audioArgs != nil {
+		r, err := s.spawnLeg(ctx, s.audioBin, audioArgs)
 		if err != nil {
 			_ = closeAll()
 			return nil, fmt.Errorf("%w: audio: %v", models.ErrFFmpegSpawn, err)
@@ -316,12 +372,8 @@ func (s *multiShellSource) Open(ctx context.Context) (*Streams, error) {
 		closers = append(closers, r)
 		st.Audio = r
 	}
-	if s.videoArgs != nil {
-		bin := s.videoBin
-		if bin == "" {
-			bin = ffmpegPath()
-		}
-		r, err := gtio.NewShellReader(ctx, bin, s.videoArgs, getLogger(), StderrLogEnabled())
+	if videoArgs != nil {
+		r, err := s.spawnLeg(ctx, s.videoBin, videoArgs)
 		if err != nil {
 			_ = closeAll()
 			return nil, fmt.Errorf("%w: video: %v", models.ErrFFmpegSpawn, err)
@@ -330,6 +382,60 @@ func (s *multiShellSource) Open(ctx context.Context) (*Streams, error) {
 		st.Video = r
 	}
 	return st, nil
+}
+
+// openParallel spawns both legs concurrently. Pre-condition: both
+// audioArgs and videoArgs are non-nil (caller verified). If either leg
+// fails the other is closed; audio's error takes precedence when both
+// fail, matching openSequential's reporting order so callers don't see
+// a behavior change just because they flipped the flag.
+func (s *MultiShellSource) openParallel(ctx context.Context, audioArgs, videoArgs []string) (*Streams, error) {
+	var (
+		wg                 sync.WaitGroup
+		audioR, videoR     *gtio.ShellReader
+		audioErr, videoErr error
+	)
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		audioR, audioErr = s.spawnLeg(ctx, s.audioBin, audioArgs)
+	}()
+	go func() {
+		defer wg.Done()
+		videoR, videoErr = s.spawnLeg(ctx, s.videoBin, videoArgs)
+	}()
+	wg.Wait()
+
+	if audioErr != nil {
+		if videoR != nil {
+			_ = videoR.Close()
+		}
+		return nil, fmt.Errorf("%w: audio: %v", models.ErrFFmpegSpawn, audioErr)
+	}
+	if videoErr != nil {
+		if audioR != nil {
+			_ = audioR.Close()
+		}
+		return nil, fmt.Errorf("%w: video: %v", models.ErrFFmpegSpawn, videoErr)
+	}
+	closers := []stdio.Closer{audioR, videoR}
+	closeAll := func() error {
+		var firstErr error
+		for _, c := range closers {
+			if err := c.Close(); err != nil && firstErr == nil {
+				firstErr = err
+			}
+		}
+		return firstErr
+	}
+	return &Streams{close: closeAll, Audio: audioR, Video: videoR}, nil
+}
+
+func (s *MultiShellSource) spawnLeg(ctx context.Context, bin string, args []string) (*gtio.ShellReader, error) {
+	if bin == "" {
+		bin = ffmpegPath()
+	}
+	return gtio.NewShellReader(ctx, bin, args, getLogger(), StderrLogEnabled())
 }
 
 // injectSeek returns args with `-ss <offset>` placed immediately before the

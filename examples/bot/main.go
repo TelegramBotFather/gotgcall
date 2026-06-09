@@ -19,6 +19,11 @@
 //	APP_ID=... APP_HASH=... SESSION=... CHAT=... \
 //	    go run . 'shells:ffmpeg -i movie.mp4|ffmpeg -i movie.mp4 -vf scale=1280:720'
 //
+//	# Same, with both legs spawning concurrently (independent inputs only —
+//	# skip when both legs hit the same CDN URL):
+//	APP_ID=... APP_HASH=... SESSION=... CHAT=... \
+//	    go run . 'shellsp:ffmpeg -i song.mp3|ffmpeg -f v4l2 -i /dev/video0'
+//
 // Flow:
 //
 //  1. gogram fetches the full channel/chat to obtain the active group-call ref.
@@ -227,9 +232,10 @@ func envOr(k, def string) string {
 
 // buildSource picks the right gotgcall constructor based on the argument shape:
 //
-//   - "shell:<cmd>"            → FromShell (one custom ffmpeg leg, audio)
-//   - "shellv:<cmd>"           → FromShell (one custom ffmpeg leg, video)
-//   - "shells:<audio>|<video>" → FromShells (two custom legs; either side may be empty)
+//   - "shell:<cmd>"             → FromShell (one custom ffmpeg leg, audio)
+//   - "shellv:<cmd>"            → FromShell (one custom ffmpeg leg, video)
+//   - "shells:<audio>|<video>"  → FromShells (two custom legs; either side may be empty)
+//   - "shellsp:<audio>|<video>" → FromShells + WithParallelSpawn (both legs concurrently)
 //   - "http(s)://", "rtmp://", "rtsp://"
 //     → FromURL (lib builds ffmpeg argv with HLS/HTTP
 //     flags — reconnect, timeout, user-agent)
@@ -241,6 +247,14 @@ func envOr(k, def string) string {
 func buildSource(arg string) gotgcall.Source {
 	opt := gotgcall.EncodeOptions{}
 	switch {
+	case strings.HasPrefix(arg, "shellsp:"):
+		// "shellsp:<audio>|<video>" — same as shells: but spawns both legs
+		// concurrently. Only safe when the legs read independent inputs
+		// (separate files, cam/mic devices); same-URL CDN inputs should
+		// stick to "shells:" to avoid per-IP concurrency throttles.
+		rest := strings.TrimPrefix(arg, "shellsp:")
+		audio, video, _ := strings.Cut(rest, "|")
+		return gotgcall.FromShells(audio, video).WithParallelSpawn()
 	case strings.HasPrefix(arg, "shells:"):
 		// "shells:<audio>|<video>" — either side may be empty to skip that track.
 		rest := strings.TrimPrefix(arg, "shells:")

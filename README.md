@@ -134,9 +134,18 @@ client.OnConnectionChange(func(chat int64, info gotgcall.NetworkInfo) {
     log.Printf("conn state: %s", info.State)
 })
 client.OnUpgrade(func(chat int64, state gotgcall.MediaState) {
-    // Spontaneous transitions only — video leg died mid-stream or ICE
-    // failed while video was active. User-initiated SetSource/Pause/
-    // Mute/Stop are silent (your code already knows it triggered them).
+    // Fires on Mute / Unmute / Pause / Resume and on spontaneous
+    // transitions (video leg dying mid-stream, ICE Failed/Closed
+    // while video was active). SetStreamSources and Stop stay silent
+    // — the caller already knows the new state.
+    //
+    // state fields mirror Telegram's MTProto participant flags
+    // (Paused maps to video_paused — "media not flowing"):
+    //   Muted              — explicit mute toggle
+    //   Paused             — Muted || the call was paused
+    //   VideoStopped       — true for Play (audio-only), false for VPlay
+    //   PresentationPaused — same lifecycle as Paused (no presentation
+    //                        source in this library)
 })
 
 // 1. Local-side JSON.
@@ -567,12 +576,23 @@ client.OnConnectionChange(func(chat int64, info NetworkInfo) {
 })
 
 client.OnUpgrade(func(chat int64, state MediaState) {
-    // Mirror of ntgcalls' onUpgrade(MediaState). Fires ONLY on
-    // spontaneous transitions: a video leg ending mid-stream (EOF /
-    // ffmpeg crash) or the WebRTC PC reaching Failed/Closed while video
-    // was active. User-initiated transitions (SetStreamSources, Stop,
-    // Pause, Resume, Mute, Unmute) are silent — flip your MTProto
-    // participant flags directly in those command handlers, not here.
+    // Mirror of ntgcalls' onUpgrade(MediaState). Fires on Mute /
+    // Unmute / Pause / Resume and on spontaneous transitions (a video
+    // leg ending mid-stream via EOF or ffmpeg crash, or the WebRTC
+    // PC reaching Failed/Closed while video was active).
+    //
+    // SetStreamSources and Stop stay silent: the caller chose the new
+    // source / brought the call down and can mirror MTProto in the
+    // same code path. No-op toggles (e.g. Mute when already muted)
+    // are also silent.
+    //
+    // MediaState fields (Paused maps to Telegram's video_paused —
+    // i.e. "media not flowing"):
+    //   Muted              — explicit mute toggle
+    //   Paused             — Muted || internally-paused
+    //   VideoStopped       — true for Play (audio-only), false for VPlay
+    //   PresentationPaused — same as Paused (no presentation source
+    //                        in this library)
 })
 ```
 
@@ -599,7 +619,7 @@ tg.AddRawHandler(&telegram.UpdateGroupCallParticipants{}, func(u telegram.Update
 })
 ```
 
-The `OnUpgrade(MediaState)` callback fires only for **outgoing** state changes the library initiates (Mute / Pause / video stream end). Server-side mute / video-stop from Telegram is delivered only via your MTProto `UpdateGroupCallParticipants` handler — gotgcall stays out of MTProto by design.
+The `OnUpgrade(MediaState)` callback fires for **outgoing** state changes — Mute / Unmute / Pause / Resume plus spontaneous video-leg EOF or ICE Failed/Closed. Server-side mute / video-stop from Telegram is delivered only via your MTProto `UpdateGroupCallParticipants` handler — gotgcall stays out of MTProto by design.
 
 ## Errors
 

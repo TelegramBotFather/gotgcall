@@ -674,22 +674,31 @@ func (c *Client) OnConnectionChange(fn func(chatID int64, info NetworkInfo)) {
 	c.cbMu.Unlock()
 }
 
-// OnUpgrade registers a callback fired only on *spontaneous* outgoing
-// media-state transitions — ones the library itself initiates without an
-// API call from the caller. User-initiated transitions
-// (SetStreamSources, Stop, Pause, Resume, Mute, Unmute) are silent
-// because the caller already knows they triggered them and can flip the
-// MTProto participant flags in the same code path.
+// OnUpgrade registers a callback fired whenever the outgoing
+// MediaState flips a bit. Mirror of ntgcalls' onUpgrade(MediaState).
 //
-// In practice OnUpgrade fires when:
-//   - A video leg ends mid-stream (EOF / ffmpeg crash) — VideoStopped
-//     flips false→true. (Audio-only sources do not fire here because
-//     VideoStopped was already true.)
-//   - The WebRTC PC transitions to Failed/Closed while video was
-//     active — same VideoStopped flip.
+// Fires on:
+//   - Mute / Unmute — flips Muted (and Paused / PresentationPaused
+//     follow, since the mic is no longer producing audio).
+//   - Pause / Resume — flips Paused and PresentationPaused while
+//     Muted stays put.
+//   - A video leg ending mid-stream (EOF / ffmpeg crash) — VideoStopped
+//     flips false→true. Audio-only sources had VideoStopped=true
+//     already, so they don't fire here.
+//   - The WebRTC PC transitioning to Failed/Closed while video was
+//     active — same VideoStopped flip as the EOF case.
 //
-// Mirror of ntgcalls' onUpgrade(MediaState). Fires on the dispatcher
-// goroutine, safe to re-enter the Client API from within.
+// Does NOT fire on:
+//   - SetStreamSources — the caller chose the new source and already
+//     knows the resulting VideoStopped (true for Play / audio-only,
+//     false for VPlay / audio+video). A same-shape re-source (e.g.
+//     Play → Play) would have prev == cur anyway.
+//   - Stop — the call is gone, there is nothing left to mirror.
+//   - No-op toggles (Mute when already muted, etc.) — the helper
+//     skips dispatch when prev == cur.
+//
+// Fires on the dispatcher goroutine, so it is safe to re-enter the
+// Client API from inside the callback.
 func (c *Client) OnUpgrade(fn func(chatID int64, state MediaState)) {
 	c.cbMu.Lock()
 	c.onUpgrade = fn

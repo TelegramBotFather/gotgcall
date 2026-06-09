@@ -4,7 +4,7 @@ go 1.26.4
 
 require (
 	github.com/amarnathcjd/gogram v1.7.3
-	github.com/annihilatorrrr/gotgcall v0.6.24
+	github.com/annihilatorrrr/gotgcall v0.8.0
 )
 
 require (
@@ -20,7 +20,7 @@ require (
 	github.com/pion/srtp/v3 v3.0.11 // indirect
 	github.com/pion/stun/v3 v3.1.5 // indirect
 	github.com/pion/transport/v4 v4.0.2 // indirect
-	github.com/pion/turn/v5 v5.0.9 // indirect
+	github.com/pion/turn/v5 v5.0.10 // indirect
 	github.com/pion/webrtc/v4 v4.2.15 // indirect
 	github.com/wlynxg/anet v0.0.5 // indirect
 	golang.org/x/crypto v0.53.0 // indirect

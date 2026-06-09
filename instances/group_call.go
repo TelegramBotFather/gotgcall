@@ -19,10 +19,13 @@ import (
 type GroupCallEvents struct {
 	OnStreamEnd        func(t models.StreamType, d models.Device, err error)
 	OnConnectionChange func(info models.NetworkInfo)
-	// OnUpgrade fires only on *spontaneous* outgoing-state transitions —
-	// video leg EOF/crash mid-stream, or PC Failed/Closed while video was
-	// active. User-initiated transitions (SetSource / Pause / Resume /
-	// Mute / Unmute / Stop) do not fire — the caller already knows.
+	// OnUpgrade fires on every outgoing state change that flips a
+	// MediaState bit: Pause / Resume / Mute / Unmute (each only when the
+	// state actually changed — no-op toggles stay silent), plus
+	// *spontaneous* transitions (video leg EOF/crash mid-stream, PC
+	// Failed/Closed while video was active). SetSource and Stop do not
+	// fire: the caller chose the new source / brought the call down and
+	// can drive MTProto flags directly in the same code path.
 	// Mirror of ntgcalls' onUpgrade(MediaState) pattern.
 	OnUpgrade func(state models.MediaState)
 }
@@ -479,11 +482,19 @@ func (g *GroupCall) handleStreamerEnd(t models.StreamType, d models.Device, err 
 // currentStateLocked computes the MediaState a hypothetical OnUpgrade
 // callback would report right now. Caller must hold g.mu (read or
 // write — read fields only).
+//
+// Paused and PresentationPaused both follow g.muted||g.paused — the
+// outgoing media is not flowing whenever the user muted or paused, so
+// the MTProto-mirrored "paused" flags flip together. The library has
+// no presentation source, so PresentationPaused has no independent
+// state — exposing it keeps downstream MTProto code uniform.
 func (g *GroupCall) currentStateLocked() models.MediaState {
+	silent := g.muted || g.paused
 	return models.MediaState{
-		Muted:        g.muted,
-		Paused:       g.paused,
-		VideoStopped: g.videoStr == nil,
+		Muted:              g.muted,
+		Paused:             silent,
+		VideoStopped:       g.videoStr == nil,
+		PresentationPaused: silent,
 	}
 }
 
@@ -491,21 +502,31 @@ func (g *GroupCall) currentStateLocked() models.MediaState {
 // current state differs from prev. Caller must hold g.mu. Dispatch is
 // async via the shared dispatcher so callers can safely re-enter Client
 // API from inside the callback.
+//
+// The nil-check on disp/OnUpgrade runs *before* the second
+// currentStateLocked call — when no listener is wired up, we skip the
+// struct literal entirely. Cheap, but every Mute/Pause/Resume/Unmute
+// goes through here.
 func (g *GroupCall) fireUpgradeIfChangedLocked(prev models.MediaState) {
-	cur := g.currentStateLocked()
-	if prev == cur {
+	if g.disp == nil || g.ev.OnUpgrade == nil {
 		return
 	}
-	if g.disp == nil || g.ev.OnUpgrade == nil {
+	cur := g.currentStateLocked()
+	if prev == cur {
 		return
 	}
 	g.disp.Submit(func() { g.ev.OnUpgrade(cur) })
 }
 
-// Pause / Resume / Mute / Unmute are user-initiated transitions and do
-// NOT fire OnUpgrade — the caller already knows they triggered the
-// change. OnUpgrade is reserved for spontaneous transitions (video leg
-// EOF mid-stream, ICE failure).
+// Pause / Resume / Mute / Unmute fire OnUpgrade on real transitions so
+// callers can drive the matching MTProto participant flags off the
+// callback. No-op toggles (already in the target state) stay silent —
+// fireUpgradeIfChangedLocked skips when prev == cur. Stop and
+// SetStreamSources remain silent: Stop tears the call down (no peer
+// left to mirror to) and SetStreamSources is the caller's own
+// transition (they already know the new VideoStopped). Spontaneous
+// transitions (video leg EOF mid-stream, ICE Failed/Closed) still
+// fire from handleStreamerEnd / the PC state callback.
 func (g *GroupCall) Pause() (bool, error) {
 	if g.closed.Load() {
 		return false, models.ErrClosed
@@ -515,6 +536,7 @@ func (g *GroupCall) Pause() (bool, error) {
 	if g.paused {
 		return false, nil
 	}
+	prev := g.currentStateLocked()
 	g.paused = true
 	// Block the pull loop on the streamer's gate without killing ffmpeg.
 	// The OS pipe absorbs the next ~1s of frames; Resume wakes the loop.
@@ -524,6 +546,7 @@ func (g *GroupCall) Pause() (bool, error) {
 	if g.videoStr != nil {
 		g.videoStr.SetPaused(true)
 	}
+	g.fireUpgradeIfChangedLocked(prev)
 	return true, nil
 }
 
@@ -536,6 +559,7 @@ func (g *GroupCall) Resume() (bool, error) {
 	if !g.paused {
 		return false, nil
 	}
+	prev := g.currentStateLocked()
 	g.paused = false
 	// If streamers exist (gate-paused), just unblock them. Otherwise, the
 	// source was never started (e.g. paused before SetStreamSources) — start now.
@@ -546,12 +570,16 @@ func (g *GroupCall) Resume() (bool, error) {
 		if g.videoStr != nil {
 			g.videoStr.SetPaused(false)
 		}
+		g.fireUpgradeIfChangedLocked(prev)
 		return true, nil
 	}
 	if g.src == nil {
+		g.fireUpgradeIfChangedLocked(prev)
 		return true, nil
 	}
-	return true, g.startLocked(context.Background())
+	err := g.startLocked(context.Background())
+	g.fireUpgradeIfChangedLocked(prev)
+	return true, err
 }
 
 func (g *GroupCall) Mute() (bool, error) {
@@ -563,10 +591,12 @@ func (g *GroupCall) Mute() (bool, error) {
 	if g.muted {
 		return false, nil
 	}
+	prev := g.currentStateLocked()
 	g.muted = true
 	if g.audioStr != nil {
 		g.audioStr.SetMuted(true)
 	}
+	g.fireUpgradeIfChangedLocked(prev)
 	return true, nil
 }
 
@@ -579,10 +609,12 @@ func (g *GroupCall) Unmute() (bool, error) {
 	if !g.muted {
 		return false, nil
 	}
+	prev := g.currentStateLocked()
 	g.muted = false
 	if g.audioStr != nil {
 		g.audioStr.SetMuted(false)
 	}
+	g.fireUpgradeIfChangedLocked(prev)
 	return true, nil
 }
 
@@ -624,7 +656,7 @@ func (g *GroupCall) ElapsedMs() uint64 {
 func (g *GroupCall) State() models.MediaState {
 	g.mu.RLock()
 	defer g.mu.RUnlock()
-	return models.MediaState{Muted: g.muted, Paused: g.paused, VideoStopped: g.videoStr == nil}
+	return g.currentStateLocked()
 }
 
 func (g *GroupCall) NetState() models.ConnState {

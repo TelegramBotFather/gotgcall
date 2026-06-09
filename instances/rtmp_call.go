@@ -131,10 +131,12 @@ func (r *RTMPCall) Pause() (bool, error) {
 	if r.paused {
 		return false, nil
 	}
+	prev := r.currentStateLocked()
 	r.paused = true
 	r.resumeMs = uint64(time.Since(r.startedAt) / time.Millisecond)
 	r.elapsedMs.Store(r.resumeMs)
 	r.stopFFmpegLocked()
+	r.fireUpgradeIfChangedLocked(prev)
 	return true, nil
 }
 
@@ -147,8 +149,11 @@ func (r *RTMPCall) Resume() (bool, error) {
 	if !r.paused {
 		return false, nil
 	}
+	prev := r.currentStateLocked()
 	r.paused = false
-	return true, r.spawnLocked(context.Background(), r.resumeMs)
+	err := r.spawnLocked(context.Background(), r.resumeMs)
+	r.fireUpgradeIfChangedLocked(prev)
+	return true, err
 }
 
 func (r *RTMPCall) Mute() (bool, error)   { return r.notSupportedToggle(&r.muted, true) }
@@ -160,9 +165,11 @@ func (r *RTMPCall) notSupportedToggle(flag *bool, target bool) (bool, error) {
 	if *flag == target {
 		return false, nil
 	}
+	prev := r.currentStateLocked()
 	*flag = target
 	// RTMP push has no fine-grained mute. We log and fake state.
 	r.log.Debug("rtmp_call: mute/unmute is best-effort (no SFU control)")
+	r.fireUpgradeIfChangedLocked(prev)
 	return true, nil
 }
 
@@ -197,7 +204,38 @@ func (r *RTMPCall) ElapsedMs() uint64 {
 func (r *RTMPCall) State() models.MediaState {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return models.MediaState{Muted: r.muted, Paused: r.paused}
+	return r.currentStateLocked()
+}
+
+// currentStateLocked builds the MediaState for the RTMP path. RTMP
+// always pushes H.264 video (VideoStopped is permanently false), and
+// the audio is "silent" in both the Muted and Paused senses, so
+// Paused / PresentationPaused mirror muted||paused — same shape as
+// GroupCall.currentStateLocked.
+func (r *RTMPCall) currentStateLocked() models.MediaState {
+	silent := r.muted || r.paused
+	return models.MediaState{
+		Muted:              r.muted,
+		Paused:             silent,
+		VideoStopped:       false,
+		PresentationPaused: silent,
+	}
+}
+
+// fireUpgradeIfChangedLocked mirrors GroupCall's helper: dispatch
+// OnUpgrade asynchronously when prev != cur. Submit never blocks, so
+// it is safe to call while holding r.mu. The disp/OnUpgrade nil-check
+// runs first so we skip the second currentStateLocked when nothing
+// is wired up.
+func (r *RTMPCall) fireUpgradeIfChangedLocked(prev models.MediaState) {
+	if r.disp == nil || r.ev.OnUpgrade == nil {
+		return
+	}
+	cur := r.currentStateLocked()
+	if prev == cur {
+		return
+	}
+	r.disp.Submit(func() { r.ev.OnUpgrade(cur) })
 }
 
 func (r *RTMPCall) NetState() models.ConnState {

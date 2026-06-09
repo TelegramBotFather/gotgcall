@@ -99,22 +99,22 @@ func main() {
 		log.Printf("conn chat=%d state=%s", chat, info.State)
 	})
 
-	// Spontaneous outgoing-state transitions only — fires when a video
-	// leg dies mid-stream (EOF/ffmpeg crash) or when ICE Failed/Closed
-	// while video was active. User-initiated changes (SetStreamSources,
-	// Pause, Mute, Stop, …) DON'T fire because your bot code already
-	// knows it triggered them — flip your MTProto participant flags
-	// (phone.EditGroupCallParticipant) directly in those command
-	// handlers, not in this callback.
+	// Fires on Mute/Unmute/Pause/Resume and on spontaneous transitions
+	// (video leg dies mid-stream, ICE Failed/Closed while video was
+	// active). SetStreamSources and Stop stay silent — your handler
+	// for those already knows what it just did. Use this callback to
+	// drive phone.EditGroupCallParticipant uniformly off MediaState.
 	client.OnUpgrade(func(chat int64, state gotgcall.MediaState) {
-		log.Printf("upgrade chat=%d muted=%v paused=%v video_stopped=%v",
-			chat, state.Muted, state.Paused, state.VideoStopped)
-		// Spontaneous transition (video died). Sync MTProto so other
-		// participants see the participant's video_stopped flip:
+		log.Printf("upgrade chat=%d muted=%v paused=%v video_stopped=%v presentation_paused=%v",
+			chat, state.Muted, state.Paused, state.VideoStopped, state.PresentationPaused)
+		// Example MTProto sync:
 		//   tg.PhoneEditGroupCallParticipant(&telegram.PhoneEditGroupCallParticipantParams{
-		//       Call:          inputCall,
-		//       Participant:   &telegram.InputPeerSelf{},
-		//       VideoStopped:  state.VideoStopped,
+		//       Call:               inputCall,
+		//       Participant:        &telegram.InputPeerSelf{},
+		//       Muted:              state.Muted,
+		//       VideoPaused:        state.Paused,
+		//       VideoStopped:       state.VideoStopped,
+		//       PresentationPaused: state.PresentationPaused,
 		//   })
 	})
 

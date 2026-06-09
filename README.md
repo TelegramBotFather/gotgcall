@@ -74,7 +74,7 @@ That's a working voice-chat playback bot. Everything else in this README is opti
 | **Modes** | WebRTC group call · RTMP livestream push |
 | **License** | MIT |
 
-> **Status — work in progress.** Built for my own bots; the API is intentionally close to ntgcalls so existing code translates with minimal change. Breaking changes are tagged in releases.
+> **Status — Stable.** Built for my own bots; the API is intentionally close to ntgcalls so existing code translates with minimal change. Breaking changes are tagged in releases.
 
 <details>
 <summary><b>Table of contents</b></summary>
@@ -694,23 +694,31 @@ Audio-only is the cheap path. The 25–40 MB number for video is ffmpeg's encode
 
 Both use the same codecs at the same bitrates against the same SFU, so wire bandwidth is identical. The differences are operational.
 
-**Apples-to-apples note.** ntgcalls compiles libwebrtc into the bot process, so its encoder cost is *inside* the library number. gotgcall offloads encoding to ffmpeg as a subprocess. To compare fairly, the table splits library-side cost from the ffmpeg subprocess (which you can pin with `-threads 1` to bound it).
+**Apples-to-apples note.** Both stacks run ffmpeg as a subprocess — the difference is *where the encoder lives*. ntgcalls pipes raw `pcm_s16le` / YUV into libwebrtc and encodes Opus / VP8 *in-process*; gotgcall has ffmpeg emit pre-encoded Opus (OGG) / VP8 (IVF) and the library just packetises + SRTPs. Total encoding work is the same — gotgcall just moves it out of your bot process where you can pin it with `-threads 1`.
 
 ### CPU per call (audio-only, steady state)
 
-| Component         | ntgcalls                                            | gotgcall                                                  |
-| ----------------- | --------------------------------------------------- | --------------------------------------------------------- |
-| Library itself    | ~1–2 % of one core (includes in-process Opus encoder) | **under 1 %** of one core (RTP packetise + SRTP only)     |
-| ffmpeg subprocess | — (none)                                            | ~1–3 % of one core; pin with `-threads 1` to bound it     |
-| **Total**         | **~1–2 %**                                          | **~2–4 %**                                                |
+| Component         | ntgcalls                                              | gotgcall                                                  |
+| ----------------- | ----------------------------------------------------- | --------------------------------------------------------- |
+| Library itself    | ~1.5–2.5 % (Opus encode + RTP + SRTP + jitter)        | **under 1 %** (RTP packetise + SRTP only)                 |
+| ffmpeg subprocess | ~0.5–1 % (decode + resample to PCM, no encoder)       | ~1–2 % (decode + resample + Opus encode)                  |
+| **Total**         | **~2–3.5 %**                                          | **~1.5–3 %**                                              |
+
+### CPU per call (audio + 720p30 video)
+
+| Component         | ntgcalls                                              | gotgcall                                                  |
+| ----------------- | ----------------------------------------------------- | --------------------------------------------------------- |
+| Library itself    | ~6–12 % (VP8 + Opus encode + pacer + SRTP)            | **under 1 %** (RTP packetise + SRTP only)                 |
+| ffmpeg subprocess | ~3–5 % (decode + YUV output, no encoder)              | ~5–10 % (decode + VP8 + Opus encode)                      |
+| **Total**         | **~9–17 %**                                           | **~6–11 %**                                               |
 
 ### Memory per call
 
 | Component         | ntgcalls                              | gotgcall                                                  |
 | ----------------- | ------------------------------------- | --------------------------------------------------------- |
-| Library itself    | ~15–25 MB (libwebrtc + jitter buffers)| **~1–3 MB** Go heap                                       |
-| ffmpeg subprocess | — (none)                              | ~6–10 MB (audio) · ~25–40 MB per leg (720p30 video)       |
-| **Total**         | **~15–25 MB**                         | **~7–12 MB (audio) · ~50–80 MB (audio+video)**            |
+| Library itself    | ~15–25 MB (libwebrtc state)           | **~1–3 MB** Go heap                                       |
+| ffmpeg subprocess | ~5–8 MB (audio) · ~20–30 MB (+video)  | ~6–10 MB (audio) · ~25–40 MB (audio+video)                |
+| **Total**         | **~20–33 MB · ~35–55 MB (+video)**    | **~7–13 MB · ~26–43 MB (+video)**                         |
 
 ### Everything else
 

@@ -456,7 +456,7 @@ gotgcall.New(
 | Option | Default | Notes |
 | --- | --- | --- |
 | `WithFFmpegPath` | `"ffmpeg"` | `New()` fails fast if the binary is missing. |
-| `WithLogger` | discard | Receives gotgcall events plus ffmpeg stderr/exit. |
+| `WithLogger` | **discard** (no logs at all) | Pass a `*slog.Logger` to receive gotgcall events plus ffmpeg stderr/exit. Without this, every log call — Info, Warn, Error — is silently dropped. |
 | `WithDebugLogs` | off | Convenience shortcut for debug-level slog to stderr. Use when reporting bugs. |
 | `WithFFmpegStderrLog` | off | Tees ffmpeg stderr line-by-line into the logger. Helpful for "stream runs but I hear nothing" diagnostics. |
 | `WithSharedUDPMux` | off | Multiplex every call through one UDP socket. See [UDP mux scaling](#udp-mux--scaling). |
@@ -470,6 +470,8 @@ gotgcall.New(
 | `WithVerboseConnectionLogs` | off | Debug slog + per-candidate logs. Use when reporting a stuck-in-Connecting bug. |
 
 ### Enabling debug logs
+
+> `gotgcall.New()` with no logger option produces **no logs at all** — not Info, not Warn, not Error. Logging is opt-in so the library never spams your stdout/stderr unexpectedly. Pass `WithLogger`, `WithDebugLogs`, or `WithVerboseConnectionLogs` to turn it on.
 
 For maximum verbosity when reporting a bug:
 
@@ -692,16 +694,36 @@ Audio-only is the cheap path. The 25–40 MB number for video is ffmpeg's encode
 
 Both use the same codecs at the same bitrates against the same SFU, so wire bandwidth is identical. The differences are operational.
 
-| Dimension | ntgcalls (libwebrtc, C++) | gotgcall (pure Go) |
-| --- | --- | --- |
-| **Per-call CPU (audio-only)** | ~1–2 % of one core | ~2–4 % of one core |
-| **Per-call memory** | ~15–25 MB | ~7–12 MB (audio), ~50–80 MB (audio+video) |
-| **Cold-start to first packet** | ~50–150 ms | ~80–300 ms |
-| **Cross-compile / deploy** | libwebrtc + glibc + C++ toolchain + cgo | `CGO_ENABLED=0 go build` → single static binary → scp → run |
-| **Binary size** | ~20–30 MB | ~12–18 MB |
-| **Pause/resume** | Sub-ms | WebRTC: sub-ms · RTMP: ~100–300 ms gap |
-| **Concurrent calls per process** | ~hundreds without tuning | Tens of thousands with `WithSharedUDPMux` + raised FDs |
-| **Hot-reload of encoder logic** | Recompile + redeploy | Swap an ffmpeg flag string at runtime |
+**Apples-to-apples note.** ntgcalls compiles libwebrtc into the bot process, so its encoder cost is *inside* the library number. gotgcall offloads encoding to ffmpeg as a subprocess. To compare fairly, the table splits library-side cost from the ffmpeg subprocess (which you can pin with `-threads 1` to bound it).
+
+### CPU per call (audio-only, steady state)
+
+| Component         | ntgcalls                                            | gotgcall                                                  |
+| ----------------- | --------------------------------------------------- | --------------------------------------------------------- |
+| Library itself    | ~1–2 % of one core (includes in-process Opus encoder) | **under 1 %** of one core (RTP packetise + SRTP only)     |
+| ffmpeg subprocess | — (none)                                            | ~1–3 % of one core; pin with `-threads 1` to bound it     |
+| **Total**         | **~1–2 %**                                          | **~2–4 %**                                                |
+
+### Memory per call
+
+| Component         | ntgcalls                              | gotgcall                                                  |
+| ----------------- | ------------------------------------- | --------------------------------------------------------- |
+| Library itself    | ~15–25 MB (libwebrtc + jitter buffers)| **~1–3 MB** Go heap                                       |
+| ffmpeg subprocess | — (none)                              | ~6–10 MB (audio) · ~25–40 MB per leg (720p30 video)       |
+| **Total**         | **~15–25 MB**                         | **~7–12 MB (audio) · ~50–80 MB (audio+video)**            |
+
+### Everything else
+
+| Dimension                    | ntgcalls (libwebrtc, C++)                     | gotgcall (pure Go)                                           |
+| ---------------------------- | --------------------------------------------- | ------------------------------------------------------------ |
+| Cold-start to first packet   | ~50–150 ms                                    | ~80–300 ms                                                   |
+| Cross-compile / deploy       | libwebrtc + glibc + C++ toolchain + cgo       | `CGO_ENABLED=0 go build` → single static binary → scp → run  |
+| Binary size                  | ~20–30 MB                                     | ~12–18 MB                                                    |
+| Pause/resume                 | Sub-ms                                        | WebRTC: sub-ms · RTMP: ~100–300 ms gap                       |
+| Concurrent calls per process | ~hundreds without tuning                      | Tens of thousands with `WithSharedUDPMux` + raised FDs       |
+| Hot-reload of encoder logic  | Recompile + redeploy                          | Swap an ffmpeg flag string at runtime                        |
+
+**The library itself is leaner in gotgcall** — well under a percent of CPU and a few MB of heap per call. The full-pipeline number is higher because ffmpeg is counted; that subprocess cost is bounded (`-threads 1`), inspectable (`ps`, `top`), and isolated (an ffmpeg crash doesn't take the bot down).
 
 **Trade-offs:**
 

@@ -1,0 +1,14 @@
+title: gotgcall
+description: The first drop-in replacement for Telegram Group Calls — with audio and video — in pure Go.
+theme: jekyll-theme-midnight
+show_downloads: true
+
+url: https://annihilatorrrr.github.io
+baseurl: /gotgcall
+repository: annihilatorrrr/gotgcall
+
+markdown: kramdown
+kramdown:
+  input: GFM
+  syntax_highlighter: rouge
+  hard_wrap: false

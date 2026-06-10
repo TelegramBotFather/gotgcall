@@ -791,7 +791,7 @@ Numbers are order-of-magnitude estimates — benchmark your workload.
 
 `gotgcall` is — at the time of writing — the **first pure-Go library that joins Telegram group calls end-to-end with audio and video**. Every other option in the Go ecosystem until now required wrapping libwebrtc through ntgcalls + cgo + a C++ toolchain.
 
-ntgcalls works fine but pulls in libwebrtc + glibc + a C++ build chain. Cross-compiling music bots becomes a maintenance burden. `gotgcall` builds with `CGO_ENABLED=0` to a single static binary on every supported platform. The trade-off is ffmpeg as a runtime dependency, which most bot deployments already have anyway.
+ntgcalls works fine but pulls in libwebrtc + glibc + a C++ build chain and has a lot of surprises like `panic: segment fault` issues with CGo. Cross-compiling music bots becomes a maintenance burden. `gotgcall` builds with `CGO_ENABLED=0` to a single static binary on every supported platform.
 
 ## FAQ
 

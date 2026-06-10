@@ -19,6 +19,7 @@ import (
 	"github.com/pion/stun/v3"
 
 	"github.com/annihilatorrrr/gotgcall/models"
+	"github.com/annihilatorrrr/gotgcall/wrtc/jsonparams"
 )
 
 // ConnStateFn is invoked when the stack's high-level connection state
@@ -237,6 +238,9 @@ func (s *Stack) Connect(ctx context.Context, remoteJSON string) error {
 	}
 	rp, err := parseRemoteJSON(remoteJSON)
 	if err != nil {
+		if errors.Is(err, jsonparams.ErrUnsupportedMode) {
+			return fmt.Errorf("%w: %v", models.ErrUnsupportedCallMode, err)
+		}
 		return fmt.Errorf("%w: %v", models.ErrInvalidParams, err)
 	}
 

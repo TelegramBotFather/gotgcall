@@ -1,17 +1,39 @@
 package jsonparams
 
 import (
+	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 
 	"github.com/pion/sdp/v3"
 )
 
+// ErrUnsupportedMode signals that Telegram's response describes the group
+// call as an RTMP livestream ({"rtmp": ...}) or an MTProto broadcast
+// stream ({"stream": ...}) rather than a WebRTC call ({"transport": ...}).
+// gotgcall has no MTProto segment-stream implementation, so the caller
+// must surface this as "not joinable as a voice chat". Mirrors ntgcalls'
+// branch in wrtc/src/models/response_payload.cpp:23-30.
+var ErrUnsupportedMode = errors.New("call mode unsupported")
+
 // ParseRemote decodes Telegram's response JSON. Lenient: unknown top-level
 // keys are ignored. Missing required keys (transport.ufrag/pwd/fingerprints)
-// yield a typed error.
+// yield a typed error. RTMP/Stream responses yield ErrUnsupportedMode.
 func ParseRemote(raw string) (*RemoteParams, error) {
+	var probe struct {
+		Rtmp   json.RawMessage `json:"rtmp"`
+		Stream json.RawMessage `json:"stream"`
+	}
+	if err := json.Unmarshal([]byte(raw), &probe); err == nil {
+		if jsonFieldPresent(probe.Rtmp) {
+			return nil, fmt.Errorf("%w: rtmp livestream", ErrUnsupportedMode)
+		}
+		if jsonFieldPresent(probe.Stream) {
+			return nil, fmt.Errorf("%w: mtproto broadcast stream", ErrUnsupportedMode)
+		}
+	}
 	rp := &RemoteParams{}
 	if err := json.Unmarshal([]byte(raw), rp); err != nil {
 		return nil, fmt.Errorf("decode remote params: %w", err)
@@ -23,6 +45,10 @@ func ParseRemote(raw string) (*RemoteParams, error) {
 		return nil, fmt.Errorf("remote params missing fingerprint")
 	}
 	return rp, nil
+}
+
+func jsonFieldPresent(raw json.RawMessage) bool {
+	return len(raw) > 0 && !bytes.Equal(raw, []byte("null"))
 }
 
 // SynthesizeRemoteOfferSDP builds an OFFER-shaped SDP from Telegram's
@@ -46,7 +72,6 @@ func SynthesizeRemoteOfferSDP(offerSDP string, rp *RemoteParams) (string, error)
 	if err := off.UnmarshalString(offerSDP); err != nil {
 		return "", fmt.Errorf("parse offer: %w", err)
 	}
-
 	syn := &sdp.SessionDescription{
 		Version: 0,
 		Origin: sdp.Origin{
@@ -62,22 +87,18 @@ func SynthesizeRemoteOfferSDP(offerSDP string, rp *RemoteParams) (string, error)
 			{Timing: sdp.Timing{StartTime: 0, StopTime: 0}},
 		},
 	}
-
 	// No a=ice-lite at session level: we WANT pion's role logic to land
 	// on ICEROLE_CONTROLLED (i.e. answerer + remote!=lite). Adding ice-lite
 	// here would flip pion back to controlling and reintroduce the 487
 	// role-conflict storm we just fixed.
-
 	for _, a := range off.Attributes {
 		if a.Key == "group" || a.Key == "msid-semantic" {
 			syn.Attributes = append(syn.Attributes, a)
 		}
 	}
-
 	for _, om := range off.MediaDescriptions {
 		syn.MediaDescriptions = append(syn.MediaDescriptions, mirrorMediaSectionAsOffer(om, rp))
 	}
-
 	b, err := syn.Marshal()
 	if err != nil {
 		return "", err
@@ -107,7 +128,6 @@ func mirrorMediaSectionAsOffer(om *sdp.MediaDescription, rp *RemoteParams) *sdp.
 			Address:     &sdp.Address{Address: "0.0.0.0"},
 		},
 	}
-
 	am.Attributes = append(am.Attributes,
 		sdp.NewAttribute("rtcp", "9 IN IP4 0.0.0.0"),
 		sdp.NewAttribute("ice-ufrag", rp.Transport.Ufrag),
@@ -123,7 +143,6 @@ func mirrorMediaSectionAsOffer(om *sdp.MediaDescription, rp *RemoteParams) *sdp.
 	// picks setup=passive (so pion = DTLS server, matching ntgcalls'
 	// SSL_SERVER). Telegram then sends ClientHello as DTLS-active.
 	am.Attributes = append(am.Attributes, sdp.NewAttribute("setup", "actpass"))
-
 	for _, a := range om.Attributes {
 		switch a.Key {
 		case "mid", "rtcp-mux", "rtcp-rsize":
@@ -133,19 +152,16 @@ func mirrorMediaSectionAsOffer(om *sdp.MediaDescription, rp *RemoteParams) *sdp.
 	// recvonly from the (synthetic) offerer's POV — Telegram only receives;
 	// pion's answer mirrors as sendonly, which matches our music-bot flow.
 	am.Attributes = append(am.Attributes, sdp.NewPropertyAttribute("recvonly"))
-
 	for _, a := range om.Attributes {
 		switch a.Key {
 		case "rtpmap", "fmtp", "rtcp-fb", "extmap":
 			am.Attributes = append(am.Attributes, a)
 		}
 	}
-
 	for _, c := range rp.Transport.Candidates {
 		am.Attributes = append(am.Attributes, sdp.NewAttribute("candidate", candidateToSDP(c)))
 	}
 	am.Attributes = append(am.Attributes, sdp.NewPropertyAttribute("end-of-candidates"))
-
 	return am
 }
 

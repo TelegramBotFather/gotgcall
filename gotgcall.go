@@ -87,17 +87,18 @@ var (
 // --- Errors (re-export for branchable errors.Is) -------------------------------
 
 var (
-	ErrConnectionExists   = models.ErrConnectionExists
-	ErrConnectionNotFound = models.ErrConnectionNotFound
-	ErrConnectionFailed   = models.ErrConnectionFailed
-	ErrInvalidParams      = models.ErrInvalidParams
-	ErrFFmpegSpawn        = models.ErrFFmpegSpawn
-	ErrFFmpegCrashed      = models.ErrFFmpegCrashed
-	ErrFile               = models.ErrFile
-	ErrClosed             = models.ErrClosed
-	ErrInternal           = models.ErrInternal
-	ErrNotConnected       = models.ErrNotConnected
-	ErrWrongMode          = models.ErrWrongMode
+	ErrConnectionExists    = models.ErrConnectionExists
+	ErrConnectionNotFound  = models.ErrConnectionNotFound
+	ErrConnectionFailed    = models.ErrConnectionFailed
+	ErrInvalidParams       = models.ErrInvalidParams
+	ErrUnsupportedCallMode = models.ErrUnsupportedCallMode
+	ErrFFmpegSpawn         = models.ErrFFmpegSpawn
+	ErrFFmpegCrashed       = models.ErrFFmpegCrashed
+	ErrFile                = models.ErrFile
+	ErrClosed              = models.ErrClosed
+	ErrInternal            = models.ErrInternal
+	ErrNotConnected        = models.ErrNotConnected
+	ErrWrongMode           = models.ErrWrongMode
 )
 
 // --- Options -------------------------------------------------------------------
